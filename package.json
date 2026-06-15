@@ -1,0 +1,21 @@
+{
+  "name": "nexi-locate",
+  "version": "1.0.0",
+  "description": "Ethiopia's Digital Location Ecosystem",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "backend/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "latest",
+    "typescript": "^5.0.0"
+  }
+}
