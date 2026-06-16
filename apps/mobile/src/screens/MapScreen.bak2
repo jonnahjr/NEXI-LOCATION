@@ -1,0 +1,305 @@
+﻿import React, { useState, useMemo, useCallback } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  TextInput,
+  Image,
+  Dimensions,
+  RefreshControl,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
+import { useAppStore } from '../store/appStore';
+import { useTheme, SPACING, RADIUS } from '../theme/colors';
+
+const { width, height } = Dimensions.get('window');
+const SHEET_HEIGHT = 280;
+
+const CATEGORY_FILTERS = [
+  { id: 'all', icon: '📍', label: 'All' },
+  { id: 'food', icon: '🍽️', label: 'Food' },
+  { id: 'cafe', icon: '☕', label: 'Cafe' },
+  { id: 'hotel', icon: '🏨', label: 'Hotel' },
+  { id: 'health', icon: '🏥', label: 'Health' },
+  { id: 'shop', icon: '🛍️', label: 'Shop' },
+  { id: 'club', icon: '🎵', label: 'Nightlife' },
+];
+
+export const MapScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const { colors } = useTheme();
+  const { businesses, savedPlaces, toggleSavedPlace } = useAppStore();
+  const [searchText, setSearchText] = useState('');
+  const [activeFilter, setActiveFilter] = useState('all');
+  const [selectedBusiness, setSelectedBusiness] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 1200);
+  }, []);
+
+  const filteredBusinesses = useMemo(() => {
+    let results = businesses;
+    if (activeFilter !== 'all') {
+      results = results.filter((b) => b.categoryId === activeFilter);
+    }
+    if (searchText.trim()) {
+      const q = searchText.toLowerCase();
+      results = results.filter(
+        (b) => b.name.toLowerCase().includes(q) || b.category.toLowerCase().includes(q),
+      );
+    }
+    return results;
+  }, [businesses, activeFilter, searchText]);
+
+  const selectedBiz = selectedBusiness
+    ? businesses.find((b) => b.id === selectedBusiness)
+    : null;
+
+  return (
+    <View style={[styles.container, { backgroundColor: colors.bg }]}>
+      {/* ── Map Area ── */}
+      <View style={styles.mapArea}>
+        {/* Google Maps-style background with roads and streets */}
+        <View style={[styles.mapBg, { backgroundColor: '#E8E9EA' }]}>
+          {Array.from({ length: 20 }).map((_, i) => (
+            <View key={`h-${i}`} style={[styles.gridLineH, { backgroundColor: colors.primaryGlow, top: `${((i + 1) / 21) * 100}%` }]} />
+          ))}
+          {Array.from({ length: 12 }).map((_, i) => (
+            <View key={`v-${i}`} style={[styles.gridLineV, { backgroundColor: colors.primaryGlow, left: `${((i + 1) / 13) * 100}%` }]} />
+          ))}
+        </View>
+
+        {/* Business Pins */}
+        {filteredBusinesses.slice(0, 30).map((biz) => {
+          const isSelected = selectedBusiness === biz.id;
+          const pinSize = isSelected ? 36 : 28;
+          return (
+            <TouchableOpacity
+              key={biz.id}
+              style={[
+                styles.pin,
+                {
+                  left: `${((biz.longitude - 38.73) / 0.05) * 100}%`,
+                  top: `${((9.05 - biz.latitude) / 0.06) * 100}%`,
+                },
+              ]}
+              onPress={() => setSelectedBusiness(biz.id)}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.pinInner, { backgroundColor: isSelected ? colors.primary : colors.danger, width: pinSize, height: pinSize, borderRadius: pinSize / 2 }]}>
+                <Ionicons name="location" size={isSelected ? 18 : 14} color="#FFF" />
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+
+        {/* Center Marker */}
+        <View style={styles.centerMarker}>
+          <View style={[styles.centerInner, { backgroundColor: colors.primary }]}>
+            <Ionicons name="navigate" size={24} color="#FFF" />
+          </View>
+          <View style={[styles.centerPulse, { borderColor: colors.primary }]} />
+        </View>
+
+        {/* Search Overlay */}
+        <View style={[styles.searchOverlay, { paddingTop: insets.top + SPACING.md }]}>
+          <View style={[styles.searchBar, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Ionicons name="search" size={18} color={colors.textMuted} />
+            <TextInput
+              style={[styles.searchInput, { color: colors.text }]}
+              placeholder="Search on map..."
+              placeholderTextColor={colors.textMuted}
+              value={searchText}
+              onChangeText={setSearchText}
+            />
+            {searchText.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchText('')}>
+                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {/* Category Filter Chips */}
+        <View style={styles.filterOverlay}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+            {CATEGORY_FILTERS.map((cat) => {
+              const isActive = activeFilter === cat.id;
+              return (
+                <TouchableOpacity
+                  key={cat.id}
+                  onPress={() => setActiveFilter(cat.id)}
+                  style={[
+                    styles.filterChip,
+                    {
+                      backgroundColor: isActive ? colors.primary : colors.card,
+                      borderColor: isActive ? colors.primary : colors.border,
+                    },
+                  ]}
+                >
+                  <Text style={styles.filterIcon}>{cat.icon}</Text>
+                  <Text style={[styles.filterLabel, { color: isActive ? '#FFF' : colors.textSub }]}>
+                    {cat.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        {/* Results Count */}
+        <View style={[styles.countBadge, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Ionicons name="location" size={14} color={colors.primary} />
+          <Text style={[styles.countText, { color: colors.text }]}>{filteredBusinesses.length} places</Text>
+        </View>
+      </View>
+
+      {/* ── Bottom Sheet ── */}
+      <View style={[styles.bottomSheet, { backgroundColor: colors.card, borderTopColor: colors.border, height: SHEET_HEIGHT, paddingBottom: insets.bottom + 16 }]}>
+        <View style={[styles.sheetHandle, { backgroundColor: colors.textMuted }]} />
+
+        {selectedBiz ? (
+          <ScrollView showsVerticalScrollIndicator={false}>
+            <View style={styles.sheetContent}>
+              <Image source={{ uri: selectedBiz.image }} style={styles.sheetImage} resizeMode="cover" />
+              <TouchableOpacity
+                onPress={() => router.push(`/business/${selectedBiz.id}`)}
+                style={styles.sheetInfo}
+              >
+                <View style={styles.sheetTop}>
+                  <Text style={[styles.sheetName, { color: colors.text }]}>{selectedBiz.name}</Text>
+                  {selectedBiz.verified && <Ionicons name="checkmark-circle" size={16} color={colors.accent} />}
+                </View>
+                <View style={styles.sheetMeta}>
+                  <Ionicons name="star" size={12} color={colors.gold} />
+                  <Text style={[styles.sheetRating, { color: colors.text }]}>{selectedBiz.rating.toFixed(1)}</Text>
+                  <Text style={[styles.sheetDot, { color: colors.textMuted }]}> • </Text>
+                  <Text style={[styles.sheetCat, { color: colors.textSub }]}>{selectedBiz.category}</Text>
+                </View>
+                <View style={styles.sheetMeta}>
+                  <Ionicons name="location" size={12} color={colors.textMuted} />
+                  <Text style={[styles.sheetDist, { color: colors.textSub }]}>{selectedBiz.distance} · {selectedBiz.address}</Text>
+                </View>
+                {selectedBiz.hours?.includes('24') || selectedBiz.hours?.includes('AM') ? (
+                  <View style={[styles.sheetBadge, { backgroundColor: colors.accentGlow }]}>
+                    <View style={[styles.openDot, { backgroundColor: colors.accent }]} />
+                    <Text style={[styles.openText, { color: colors.accent }]}>Open now</Text>
+                  </View>
+                ) : null}
+              </TouchableOpacity>
+
+              {/* Quick Actions */}
+              <View style={styles.sheetActions}>
+                <TouchableOpacity
+                  onPress={() => router.push(`/business/${selectedBiz.id}`)}
+                  style={[styles.sheetActionBtn, { backgroundColor: colors.primaryGlow }]}
+                >
+                  <Ionicons name="chevron-forward" size={16} color={colors.primary} />
+                  <Text style={[styles.sheetActionText, { color: colors.primary }]}>Details</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => toggleSavedPlace(selectedBiz.id)}
+                  style={[styles.sheetActionBtn, { backgroundColor: savedPlaces.includes(selectedBiz.id) ? colors.dangerGlow : colors.cardElevated, borderColor: colors.border }]}
+                >
+                  <Ionicons
+                    name={savedPlaces.includes(selectedBiz.id) ? 'heart' : 'heart-outline'}
+                    size={16}
+                    color={savedPlaces.includes(selectedBiz.id) ? colors.danger : colors.textSub}
+                  />
+                  <Text style={[styles.sheetActionText, { color: savedPlaces.includes(selectedBiz.id) ? colors.danger : colors.textSub }]}>
+                    {savedPlaces.includes(selectedBiz.id) ? 'Saved' : 'Save'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </ScrollView>
+        ) : (
+          <ScrollView showsVerticalScrollIndicator={false}>
+            <Text style={[styles.sheetTitle, { color: colors.text }]}>📍 Nearby Places</Text>
+            {filteredBusinesses.slice(0, 5).map((biz) => (
+              <TouchableOpacity
+                key={biz.id}
+                onPress={() => setSelectedBusiness(biz.id)}
+                style={[styles.sheetItem, { borderBottomColor: colors.border }]}
+              >
+                <Image source={{ uri: biz.image }} style={styles.sheetItemImg} resizeMode="cover" />
+                <View style={styles.sheetItemInfo}>
+                  <View style={styles.sheetItemTop}>
+                    <Text style={[styles.sheetItemName, { color: colors.text }]} numberOfLines={1}>
+                      {biz.name}
+                    </Text>
+                    {biz.verified && <Ionicons name="checkmark-circle" size={14} color={colors.accent} />}
+                  </View>
+                  <View style={styles.sheetItemMeta}>
+                    <Ionicons name="star" size={11} color={colors.gold} />
+                    <Text style={[styles.sheetItemRating, { color: colors.text }]}>{biz.rating.toFixed(1)}</Text>
+                    <Text style={[styles.sheetItemDist, { color: colors.textMuted }]}> · {biz.distance}</Text>
+                  </View>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: { flex: 1 },
+  mapArea: { flex: 1, position: 'relative', overflow: 'hidden' },
+  mapBg: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  gridLineH: { position: 'absolute', left: 0, right: 0, height: 1, opacity: 0.4 },
+  gridLineV: { position: 'absolute', top: 0, bottom: 0, width: 1, opacity: 0.4 },
+  pin: { position: 'absolute', zIndex: 10 },
+  pinInner: { alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 6 },
+  centerMarker: { position: 'absolute', top: '45%', left: '50%', marginLeft: -24, marginTop: -24, zIndex: 20, alignItems: 'center' },
+  centerInner: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 8 },
+  centerPulse: { position: 'absolute', width: 80, height: 80, borderRadius: 40, borderWidth: 2, opacity: 0.3, top: -16, left: -16 },
+  searchOverlay: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: SPACING.lg, zIndex: 30 },
+  searchBar: { flexDirection: 'row', alignItems: 'center', borderRadius: RADIUS.lg, paddingHorizontal: SPACING.md, borderWidth: 1, gap: SPACING.sm, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4 },
+  searchInput: { flex: 1, paddingVertical: SPACING.md, fontSize: 14, fontWeight: '500' },
+  filterOverlay: { position: 'absolute', top: 100, left: 0, right: 0, zIndex: 25, paddingLeft: SPACING.lg },
+  filterRow: { gap: SPACING.sm, paddingRight: SPACING.lg },
+  filterChip: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: RADIUS.full, paddingHorizontal: SPACING.md, paddingVertical: SPACING.sm, borderWidth: 1, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
+  filterIcon: { fontSize: 14 },
+  filterLabel: { fontSize: 12, fontWeight: '700' },
+  countBadge: { position: 'absolute', bottom: 10, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: RADIUS.full, paddingHorizontal: SPACING.lg, paddingVertical: SPACING.sm, borderWidth: 1, zIndex: 15 },
+  countText: { fontSize: 12, fontWeight: '700' },
+  bottomSheet: { borderTopWidth: 1, borderTopLeftRadius: RADIUS.xl, borderTopRightRadius: RADIUS.xl, paddingHorizontal: SPACING.xl, paddingTop: SPACING.md, position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 50 },
+  sheetHandle: { width: 36, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: SPACING.md },
+  sheetContent: { gap: SPACING.md },
+  sheetImage: { width: '100%', height: 100, borderRadius: RADIUS.lg },
+  sheetInfo: { gap: 4 },
+  sheetTop: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  sheetName: { fontSize: 16, fontWeight: '800' },
+  sheetMeta: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  sheetRating: { fontSize: 13, fontWeight: '700' },
+  sheetDot: { fontSize: 14 },
+  sheetCat: { fontSize: 12, fontWeight: '500' },
+  sheetDist: { fontSize: 12, fontWeight: '500' },
+  sheetBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, alignSelf: 'flex-start', marginTop: 2 },
+  openDot: { width: 5, height: 5, borderRadius: 2.5 },
+  openText: { fontSize: 10, fontWeight: '700' },
+  sheetActions: { flexDirection: 'row', gap: SPACING.md },
+  sheetActionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: RADIUS.lg, paddingVertical: SPACING.sm, borderWidth: 1, borderColor: 'transparent' },
+  sheetActionText: { fontSize: 12, fontWeight: '700' },
+  sheetTitle: { fontSize: 16, fontWeight: '700', marginBottom: SPACING.md },
+  sheetItem: { flexDirection: 'row', alignItems: 'center', gap: SPACING.md, paddingVertical: SPACING.md, borderBottomWidth: 1 },
+  sheetItemImg: { width: 44, height: 44, borderRadius: RADIUS.sm },
+  sheetItemInfo: { flex: 1, gap: 2 },
+  sheetItemTop: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  sheetItemName: { fontSize: 14, fontWeight: '700', flex: 1 },
+  sheetItemMeta: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  sheetItemRating: { fontSize: 12, fontWeight: '700' },
+  sheetItemDist: { fontSize: 11, fontWeight: '500' },
+});
+
