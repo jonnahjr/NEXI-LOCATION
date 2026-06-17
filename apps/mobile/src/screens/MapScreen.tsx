@@ -1,20 +1,19 @@
-﻿import React, { useState, useMemo, useCallback } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  TextInput,
-  Image,
-  Dimensions,
-  RefreshControl,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+﻿import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import React, { useCallback, useMemo, useState } from 'react';
+import {
+  Dimensions,
+  Image,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppStore } from '../store/appStore';
-import { useTheme, SPACING, RADIUS } from '../theme/colors';
+import { RADIUS, SPACING, useTheme } from '../theme/colors';
 
 const { width, height } = Dimensions.get('window');
 const SHEET_HEIGHT = 280;
@@ -68,12 +67,28 @@ export const MapScreen: React.FC = () => {
       <View style={styles.mapArea}>
         {/* Google Maps-style background with roads and streets */}
         <View style={[styles.mapBg, { backgroundColor: '#E8E9EA' }]}>
-          {Array.from({ length: 20 }).map((_, i) => (
-            <View key={`h-${i}`} style={[styles.gridLineH, { backgroundColor: colors.primaryGlow, top: `${((i + 1) / 21) * 100}%` }]} />
-          ))}
-          {Array.from({ length: 12 }).map((_, i) => (
-            <View key={`v-${i}`} style={[styles.gridLineV, { backgroundColor: colors.primaryGlow, left: `${((i + 1) / 13) * 100}%` }]} />
-          ))}
+          {/* Water / park shapes */}
+          <View style={[styles.park, { left: '10%', top: '18%', width: '22%', height: '18%' }]} />
+          <View style={[styles.water, { left: '60%', top: '55%', width: '30%', height: '18%', borderRadius: 10 }]} />
+
+          {/* Major roads */}
+          <View style={[styles.majorRoad, { top: '30%' }]} />
+          <View style={[styles.majorRoad, { top: '52%' }]} />
+
+          {/* Secondary roads (vertical slices) */}
+          <View style={[styles.secondaryRoad, { left: '25%', top: '5%', height: '90%' }]} />
+          <View style={[styles.secondaryRoad, { left: '50%', top: '2%', height: '95%' }]} />
+          <View style={[styles.secondaryRoad, { left: '75%', top: '12%', height: '80%' }]} />
+
+          {/* Minor street grid */}
+          <View style={styles.gridOverlay}>
+            {Array.from({ length: 12 }).map((_, i) => (
+              <View key={`h-${i}`} style={[styles.gridLineH, { backgroundColor: '#D3D3D6', top: `${((i + 1) / 14) * 100}%`, opacity: 0.18 }]} />
+            ))}
+            {Array.from({ length: 8 }).map((_, i) => (
+              <View key={`v-${i}`} style={[styles.gridLineV, { backgroundColor: '#D3D3D6', left: `${((i + 1) / 9) * 100}%`, opacity: 0.18 }]} />
+            ))}
+          </View>
         </View>
 
         {/* Business Pins */}
@@ -127,32 +142,7 @@ export const MapScreen: React.FC = () => {
           </View>
         </View>
 
-        {/* Category Filter Chips */}
-        <View style={styles.filterOverlay}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-            {CATEGORY_FILTERS.map((cat) => {
-              const isActive = activeFilter === cat.id;
-              return (
-                <TouchableOpacity
-                  key={cat.id}
-                  onPress={() => setActiveFilter(cat.id)}
-                  style={[
-                    styles.filterChip,
-                    {
-                      backgroundColor: isActive ? colors.primary : colors.card,
-                      borderColor: isActive ? colors.primary : colors.border,
-                    },
-                  ]}
-                >
-                  <Text style={styles.filterIcon}>{cat.icon}</Text>
-                  <Text style={[styles.filterLabel, { color: isActive ? '#FFF' : colors.textSub }]}>
-                    {cat.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        </View>
+
 
         {/* Results Count */}
         <View style={[styles.countBadge, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -222,6 +212,32 @@ export const MapScreen: React.FC = () => {
           </ScrollView>
         ) : (
           <ScrollView showsVerticalScrollIndicator={false}>
+            <View style={{ paddingVertical: SPACING.sm }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+                {CATEGORY_FILTERS.map((cat) => {
+                  const isActive = activeFilter === cat.id;
+                  return (
+                    <TouchableOpacity
+                      key={cat.id}
+                      onPress={() => setActiveFilter(cat.id)}
+                      style={[
+                        styles.filterChip,
+                        {
+                          backgroundColor: isActive ? colors.primary : colors.card,
+                          borderColor: isActive ? colors.primary : colors.border,
+                          marginRight: SPACING.sm,
+                        },
+                      ]}
+                    >
+                      <Text style={styles.filterIcon}>{cat.icon}</Text>
+                      <Text style={[styles.filterLabel, { color: isActive ? '#FFF' : colors.textSub }]}>
+                        {cat.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            </View>
             <Text style={[styles.sheetTitle, { color: colors.text }]}>📍 Nearby Places</Text>
             {filteredBusinesses.slice(0, 5).map((biz) => (
               <TouchableOpacity
@@ -257,8 +273,15 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   mapArea: { flex: 1, position: 'relative', overflow: 'hidden' },
   mapBg: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  gridLineH: { position: 'absolute', left: 0, right: 0, height: 1, opacity: 0.4 },
-  gridLineV: { position: 'absolute', top: 0, bottom: 0, width: 1, opacity: 0.4 },
+  /* Park and water shapes to mimic map features */
+  park: { position: 'absolute', backgroundColor: '#D8F0C6', borderRadius: 12, opacity: 0.45 },
+  water: { position: 'absolute', backgroundColor: '#B3D9F5', opacity: 0.45 },
+  /* Road styles */
+  majorRoad: { position: 'absolute', left: 0, right: 0, height: 6, backgroundColor: '#FFE082', borderRadius: 4, elevation: 2 },
+  secondaryRoad: { position: 'absolute', width: 3, backgroundColor: '#F2E5C3', opacity: 0.85, borderRadius: 2 },
+  gridOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  gridLineH: { position: 'absolute', left: 0, right: 0, height: 1, opacity: 0.18 },
+  gridLineV: { position: 'absolute', top: 0, bottom: 0, width: 1, opacity: 0.18 },
   pin: { position: 'absolute', zIndex: 10 },
   pinInner: { alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 6 },
   centerMarker: { position: 'absolute', top: '45%', left: '50%', marginLeft: -24, marginTop: -24, zIndex: 20, alignItems: 'center' },
