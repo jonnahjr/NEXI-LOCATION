@@ -28,7 +28,34 @@
       "expo-router",
       "expo-font",
       "expo-splash-screen",
-      "expo-status-bar"
+      "expo-status-bar",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Nexi Locate needs your location to show nearby places and navigate.",
+          "locationWhenInUsePermission": "Nexi Locate needs your location to show nearby places."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Nexi Locate needs camera access to take photos and record videos of places.",
+          "microphonePermission": "Nexi Locate needs microphone access to record audio with videos.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Nexi Locate needs microphone access to record audio for reviews."
+        }
+      ],
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "Nexi Locate needs access to your contacts to share places and invite friends."
+        }
+      ]
     ]
   }
 }
