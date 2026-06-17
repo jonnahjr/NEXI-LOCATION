@@ -101,6 +101,17 @@ export default function TabLayout() {
           }}
         />
         <Tabs.Screen
+          name="saved"
+          options={{
+            title: 'Saved',
+            tabBarIcon: ({ color, focused }) => (
+              <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.accentGlow }]}>
+                <Ionicons name={focused ? 'heart' : 'heart-outline'} size={22} color={color} />
+              </View>
+            ),
+          }}
+        />
+        <Tabs.Screen
           name="profile"
           options={{
             title: 'Profile',
