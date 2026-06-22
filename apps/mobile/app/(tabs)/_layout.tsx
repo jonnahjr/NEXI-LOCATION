@@ -2,13 +2,15 @@ import React, { useEffect } from 'react';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as SplashScreen from 'expo-splash-screen';
-import { View, Platform, StyleSheet } from 'react-native';
+import { View, Platform, StyleSheet, Text } from 'react-native';
 import { useTheme } from '../../src/theme/colors';
+import { useAppStore } from '../../src/store/appStore';
 
 SplashScreen.preventAutoHideAsync();
 
 export default function TabLayout() {
   const { colors } = useTheme();
+  const unreadCount = useAppStore((state) => state.unreadCount);
 
   useEffect(() => {
     (async () => {
@@ -118,6 +120,13 @@ export default function TabLayout() {
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.violetGlow }]}>
                 <Ionicons name={focused ? 'person' : 'person-outline'} size={22} color={color} />
+                {unreadCount > 0 && (
+                  <View style={[styles.badge, { backgroundColor: colors.danger }]}>
+                    <Text style={styles.badgeText}>
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </Text>
+                  </View>
+                )}
               </View>
             ),
           }}
@@ -143,5 +152,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 2,
     marginTop: -8,
+  },
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -6,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
   },
 });

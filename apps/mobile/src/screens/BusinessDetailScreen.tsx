@@ -75,12 +75,23 @@ export const BusinessDetailScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { colors } = useTheme();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, data: encodedData } = useLocalSearchParams<{ id: string; data?: string }>();
   const { businesses, savedPlaces, toggleSavedPlace } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
 
-  const business = useMemo(() => businesses.find((b) => b.id === id), [id, businesses]);
+  const business = useMemo(() => {
+    // First try local store
+    const found = businesses.find((b) => b.id === id);
+    if (found) return found;
+    // Fallback: decode business data from route params (API search results)
+    if (encodedData) {
+      try {
+        return JSON.parse(decodeURIComponent(encodedData));
+      } catch {}
+    }
+    return null;
+  }, [id, businesses, encodedData]);
   const isSaved = id ? savedPlaces.includes(id) : false;
 
   const onRefresh = useCallback(() => {
@@ -276,7 +287,8 @@ export const BusinessDetailScreen: React.FC = () => {
         {/* ── PHOTO GALLERY ── */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Photos</Text>              <TouchableOpacity onPress={() => Alert.alert('Photo Gallery', 'Full gallery coming soon.')}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Photos</Text>
+            <TouchableOpacity onPress={() => Alert.alert('Photo Gallery', 'Full gallery coming soon.')}>
               <Text style={[styles.seeAllText, { color: colors.primary }]}>See all 12+</Text>
             </TouchableOpacity>
           </View>
@@ -462,8 +474,6 @@ export const BusinessDetailScreen: React.FC = () => {
               </View>
             </View>
           ))}
-
-
         </View>
 
         {/* ── REWARDS INTEGRATION ── */}

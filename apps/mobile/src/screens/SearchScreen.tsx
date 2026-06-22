@@ -11,19 +11,23 @@ import {
   Animated,
   Image,
   Dimensions,
+  Linking,
+  Platform,
+  Vibration,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Card } from '../components/Card';
-import { BusinessCard } from '../components/BusinessCard';
-import { Button } from '../components/Button';
 import { useAppStore, Business } from '../store/appStore';
 import { useTheme, SPACING, RADIUS } from '../theme/colors';
+import { haversineKm, formatDistance, fetchBusinesses } from '../services/dataService';
+import { searchPlaces, mapPlaceTypeToCategory, getCategoryLabel, getPhotoUrl } from '../services/osmPlaces';
+import type { PlaceResult } from '../services/osmPlaces';
+import * as Location from 'expo-location';
+import WebMapView from '../components/WebMapView';
+import type { MapMarkerData, Region } from '../components/WebMapView';
 
-
-
-// ── Search Categories (user-specified) ───────────────────────────────────
+// ── Search Categories ────────────────────────────────────────────────────
 const SEARCH_CATEGORIES: { icon: string; name: string; categoryId: string }[] = [
   { icon: '🍽️', name: 'Restaurants', categoryId: 'food' },
   { icon: '☕', name: 'Cafes', categoryId: 'cafe' },
@@ -34,9 +38,12 @@ const SEARCH_CATEGORIES: { icon: string; name: string; categoryId: string }[] = 
   { icon: '⛽', name: 'Fuel Stations', categoryId: 'fuel' },
   { icon: '🛍️', name: 'Shopping', categoryId: 'shop' },
   { icon: '🏫', name: 'Schools', categoryId: 'edu' },
+  { icon: '🎵', name: 'Nightlife', categoryId: 'club' },
+  { icon: '💪', name: 'Gyms', categoryId: 'gym' },
+  { icon: '💇', name: 'Salons', categoryId: 'salon' },
 ];
 
-// ── Example Search Suggestions ───────────────────────────────────────────
+// ── Example & Trending ──────────────────────────────────────────────────
 const EXAMPLE_SEARCHES = [
   'Coffee in Bole',
   'Hotels near Airport',
@@ -45,7 +52,6 @@ const EXAMPLE_SEARCHES = [
   'Best breakfast in Addis',
 ];
 
-// ── Trending Searches ────────────────────────────────────────────────────
 const TRENDING_SEARCHES = [
   { label: 'Best Coffee Shops', icon: '☕' },
   { label: 'Top Restaurants', icon: '🍽️' },
@@ -54,7 +60,7 @@ const TRENDING_SEARCHES = [
   { label: 'Weekend Destinations', icon: '🌴' },
 ];
 
-// ── Filter Options ───────────────────────────────────────────────────────
+// ── Filter Types ─────────────────────────────────────────────────────────
 type FilterKey = 'distance' | 'rating' | 'openNow' | 'verifiedOnly';
 interface FilterState {
   distance: boolean;
@@ -63,43 +69,59 @@ interface FilterState {
   verifiedOnly: boolean;
 }
 
-// ── Result Tabs ──────────────────────────────────────────────────────────
-const RESULT_TABS = ['All', 'Places', 'Restaurants', 'Hotels', 'Services', 'Photos'];
+// ── Helper: parse distance string to km number ────────────────────────────
+function parseDistanceKm(d: string): number {
+  if (!d || d === '— km') return 999;
+  const val = parseFloat(d);
+  if (isNaN(val)) return 999;
+  if (d.includes(' m')) return val / 1000;
+  return val;
+}
 
-// ── Skeleton Card ────────────────────────────────────────────────────────
-const SkeletonCard: React.FC<{ colors: ReturnType<typeof useTheme>['colors'] }> = ({ colors }) => {
-  const shimmerAnim = useRef(new Animated.Value(0.3)).current;
+// ── Emoji by category ─────────────────────────────────────────────────────
+function getEmoji(catId: string): string {
+  const map: Record<string, string> = {
+    food: '🍽️', cafe: '☕', hotel: '🏨', health: '🏥',
+    shop: '🛍️', club: '🎵', fuel: '⛽', finance: '🏦',
+    atm: '🏧', edu: '🏫', gym: '💪', salon: '💇',
+    electronics: '📱', sports: '🚲', realestate: '🏠',
+    carwash: '🚿', auto: '🚗', loan: '💰', tech: '💻',
+    church: '⛪', government: '🏛️', park: '🌳',
+    culture: '🎭', transport: '🚌',
+  };
+  return map[catId] || '📍';
+}
 
-  useEffect(() => {
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(shimmerAnim, { toValue: 0.7, duration: 900, useNativeDriver: true }),
-        Animated.timing(shimmerAnim, { toValue: 0.3, duration: 900, useNativeDriver: true }),
-      ]),
-    );
-    animation.start();
-    return () => animation.stop();
-  }, [shimmerAnim]);
-
-  return (
-    <View style={{ marginBottom: SPACING.md }}>
-      <View style={{ flexDirection: 'row', gap: SPACING.md }}>
-        <Animated.View style={{ width: 80, height: 80, borderRadius: RADIUS.md, backgroundColor: colors.cardElevated, opacity: shimmerAnim }} />
-        <View style={{ flex: 1, gap: 6 }}>
-          <Animated.View style={{ width: '70%', height: 14, borderRadius: 4, backgroundColor: colors.cardElevated, opacity: shimmerAnim }} />
-          <Animated.View style={{ width: '45%', height: 11, borderRadius: 4, backgroundColor: colors.cardElevated, opacity: shimmerAnim }} />
-          <Animated.View style={{ width: '30%', height: 11, borderRadius: 4, backgroundColor: colors.cardElevated, opacity: shimmerAnim }} />
-        </View>
-      </View>
-    </View>
-  );
-};
+// ── Natural language → category ID mapper ───────────────────────────────
+function extractCategoryFromQuery(query: string): string {
+  const q = query.toLowerCase();
+  if (q.match(/\bhotel|\bhotel|\bhostel|\bmotel|\binn\b|\baccommodat/)) return 'hotel';
+  if (q.match(/\bcafe|\bcoffee|\bcapuccino|\bcappuccino|\blatte|\bespresso/)) return 'cafe';
+  if (q.match(/\brestaurant|\bfood|\beat|\bdining|\blunch|\bdinner|\bbreakfast/)) return 'food';
+  if (q.match(/\bpharmacy|\bpharmacies|\bmedicine|\bdrug store/)) return 'health';
+  if (q.match(/\bclinic|\bhospital|\bdoctor|\bhealth|\bmedical/)) return 'health';
+  if (q.match(/\bbank|\batm|\bfinance/)) return 'finance';
+  if (q.match(/\bfuel|\bpetrol|\bgas station/)) return 'fuel';
+  if (q.match(/\bshop|\bshopping|\bmall|\bstore|\bmarket/)) return 'shop';
+  if (q.match(/\bschool|\buniversity|\bcollege|\bedu/)) return 'edu';
+  if (q.match(/\bgym|\bfitness|\bworkout/)) return 'gym';
+  if (q.match(/\bbar|\bpub|\bnightclub|\bnightlife|\bclub/)) return 'club';
+  if (q.match(/\bsalon|\bhair|\bbeauty|\bspa/)) return 'salon';
+  return '';
+}
 
 export const SearchScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { colors } = useTheme();
-  const { searchQuery, setSearchQuery, searchCategoryFilter, setSearchCategoryFilter, businesses, savedPlaces, toggleSavedPlace } = useAppStore();
+  const {
+    searchQuery, setSearchQuery,
+    searchCategoryFilter, setSearchCategoryFilter,
+    businesses, savedPlaces, toggleSavedPlace,
+  } = useAppStore();
+
+  // ── State ───────────────────────────────────────────────────────────────
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [recentSearches, setRecentSearches] = useState<string[]>([
     'Coffee in Bole',
     'Hotels near Airport',
@@ -108,82 +130,273 @@ export const SearchScreen: React.FC = () => {
   ]);
   const [activeResultTab, setActiveResultTab] = useState('All');
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
-  const [filters, setFilters] = useState<FilterState>({ distance: false, rating: false, openNow: false, verifiedOnly: false });
+  const [filters, setFilters] = useState<FilterState>({
+    distance: false, rating: false, openNow: false, verifiedOnly: false,
+  });
   const [refreshing, setRefreshing] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [osmResults, setOsmResults] = useState<any[]>([]);
+  const [isSearchingOsm, setIsSearchingOsm] = useState(false);
+  const [supabaseResults, setSupabaseResults] = useState<Business[]>([]);
+  const osmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sbTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<TextInput>(null);
+  const miniMapRef = useRef<any>(null);
 
-  // Cleanup
+  // ── Request GPS on mount ──────────────────────────────────────────────
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        // Cached first for speed
+        const cached = await Location.getLastKnownPositionAsync({ maxAge: 120000 });
+        if (mounted && cached) {
+          setUserLocation({ latitude: cached.coords.latitude, longitude: cached.coords.longitude });
+        }
+        const fresh = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (mounted) {
+          setUserLocation({ latitude: fresh.coords.latitude, longitude: fresh.coords.longitude });
+        }
+      } catch {}
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // ── Cleanup ────────────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
+      if (osmTimeoutRef.current) clearTimeout(osmTimeoutRef.current);
+      if (sbTimeoutRef.current) clearTimeout(sbTimeoutRef.current);
     };
   }, []);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1200);
-  }, []);
+  // ── Real GPS distance helper ──────────────────────────────────────────
+  const getRealDistance = useCallback((lat: number, lng: number): string => {
+    if (!userLocation) return '— km';
+    const dist = haversineKm(userLocation.latitude, userLocation.longitude, lat, lng);
+    return formatDistance(dist);
+  }, [userLocation]);
 
-  // ── Filtered Results ────────────────────────────────────────────────────
+  // ── Local businesses with real GPS distances ───────────────────────────
+  const localBusinesses = useMemo((): Business[] => {
+    if (!userLocation) return businesses;
+    return [...businesses]
+      .map((b) => ({
+        ...b,
+        distance: getRealDistance(b.latitude, b.longitude),
+      }))
+      .sort((a, b) => {
+        const da = haversineKm(userLocation.latitude, userLocation.longitude, a.latitude, a.longitude);
+        const db = haversineKm(userLocation.latitude, userLocation.longitude, b.latitude, b.longitude);
+        return da - db;
+      });
+  }, [businesses, userLocation, getRealDistance]);
+
+  // ── OSM text search debounce ─────────────────────────────────────────
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setOsmResults([]);
+      return;
+    }
+    if (osmTimeoutRef.current) clearTimeout(osmTimeoutRef.current);
+
+    osmTimeoutRef.current = setTimeout(async () => {
+      setIsSearchingOsm(true);
+      try {
+        const results = await searchPlaces(
+          searchQuery,
+          userLocation ? { lat: userLocation.latitude, lng: userLocation.longitude } : undefined,
+          8000,
+        );
+        setOsmResults(results);
+      } catch {
+        setOsmResults([]);
+      } finally {
+        setIsSearchingOsm(false);
+      }
+    }, 400);
+
+    return () => {
+      if (osmTimeoutRef.current) clearTimeout(osmTimeoutRef.current);
+    };
+  }, [searchQuery, userLocation]);
+
+  // ── Supabase registered businesses search (parallel to OSM) ──────────
+  // Fires on both text query AND category filter so registered
+  // businesses always appear first in results.
+  useEffect(() => {
+    const query = searchQuery.trim();
+    const catId = searchCategoryFilter;
+
+    if (!query && !catId) {
+      setSupabaseResults([]);
+      return;
+    }
+
+    if (sbTimeoutRef.current) clearTimeout(sbTimeoutRef.current);
+    sbTimeoutRef.current = setTimeout(async () => {
+      try {
+        // Smart: extract a category from the natural language query
+        // e.g. "Hotels near Airport" → categoryId='hotel'
+        const extractedCat = catId || extractCategoryFromQuery(query);
+        // For the text part, strip common location phrases so Supabase
+        // searches the business name more precisely
+        const cleanQuery = query
+          .replace(/\b(near|in|around|at|close to|by)\s+\S+/gi, '')
+          .trim();
+
+        const results = await fetchBusinesses(
+          extractedCat || undefined,
+          cleanQuery || undefined,
+          userLocation?.latitude,
+          userLocation?.longitude,
+        );
+        setSupabaseResults(results);
+      } catch {
+        setSupabaseResults([]);
+      }
+    }, 300);
+
+    return () => {
+      if (sbTimeoutRef.current) clearTimeout(sbTimeoutRef.current);
+    };
+  }, [searchQuery, searchCategoryFilter, userLocation]);
+
+  // ── Map OSM results to Business-like objects ───────────────────────────
+  const mappedOsmResults = useMemo(() => {
+    return osmResults.map((place: PlaceResult) => {
+      const lat = place.geometry.location.lat;
+      const lng = place.geometry.location.lng;
+      return {
+        id: place.place_id,
+        name: place.name,
+        category: getCategoryLabel(place.types || []),
+        categoryId: mapPlaceTypeToCategory(place.types || []),
+        rating: place.rating || 0,
+        reviews: place.user_ratings_total || 0,
+        distance: getRealDistance(lat, lng),
+        latitude: lat,
+        longitude: lng,
+        image: place.photos?.[0]
+          ? getPhotoUrl(place.photos[0].photo_reference, 400)
+          : 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=400',
+        verified: place.business_status === 'OPERATIONAL',
+        description: place.formatted_address || place.vicinity || '',
+        hours: place.opening_hours?.open_now ? 'Open Now' : undefined,
+        address: place.formatted_address || place.vicinity || '',
+        phone: place.formatted_phone_number,
+        website: place.website,
+      };
+    });
+  }, [osmResults, getRealDistance]);
+
+  // ── Filtered Results — registered businesses FIRST, then OSM ─────────
   const filteredResults = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const categoryFilter = searchCategoryFilter;
 
-    let results = businesses;
+    // ── 1. Start with registered Supabase businesses (always shown) ──
+    let registeredItems: any[] = supabaseResults;
 
+    // Apply category filter to local businesses too when no supabase results yet
+    let localFiltered = localBusinesses;
     if (categoryFilter) {
-      results = results.filter((biz) => biz.categoryId === categoryFilter);
+      localFiltered = localFiltered.filter((b) => b.categoryId === categoryFilter);
     }
-
     if (query) {
-      results = results.filter(
-        (biz) =>
-          biz.name.toLowerCase().includes(query) ||
-          biz.category.toLowerCase().includes(query) ||
-          biz.address?.toLowerCase().includes(query),
+      localFiltered = localFiltered.filter(
+        (b) =>
+          b.name?.toLowerCase().includes(query) ||
+          b.category?.toLowerCase().includes(query) ||
+          b.address?.toLowerCase().includes(query),
       );
     }
 
-    // Apply filters
+    // Merge local businesses not already in supabaseResults (by id)
+    const supabaseIds = new Set(registeredItems.map((b) => b.id));
+    const extraLocal = localFiltered.filter((b) => !supabaseIds.has(b.id));
+    registeredItems = [...registeredItems, ...extraLocal];
+
+    // ── 2. OSM results — exclude duplicates (by name+coords) ────────
+    const registeredKeys = new Set(
+      registeredItems.map((b) => `${b.name.toLowerCase().trim()}|${b.latitude?.toFixed(3)}|${b.longitude?.toFixed(3)}`)
+    );
+    const osmFiltered = mappedOsmResults.filter((o) => {
+      const key = `${o.name.toLowerCase().trim()}|${o.latitude?.toFixed(3)}|${o.longitude?.toFixed(3)}`;
+      return !registeredKeys.has(key);
+    });
+
+    // Category filter on OSM results too
+    let osmFinal = osmFiltered;
+    if (categoryFilter) {
+      osmFinal = osmFiltered.filter((o) => o.categoryId === categoryFilter);
+    }
+
+    // ── 3. Merge: registered first, then OSM ────────────────────────
+    let results: any[] = [...registeredItems, ...osmFinal];
+
+    // Result tab filters
+    if (activeResultTab !== 'All') {
+      const tabMap: Record<string, string | string[]> = {
+        Restaurants: 'food',
+        Hotels: 'hotel',
+        Services: ['health', 'finance', 'edu', 'gym'],
+      };
+      const mapped = tabMap[activeResultTab];
+      if (mapped) {
+        results = results.filter((b) =>
+          Array.isArray(mapped) ? mapped.includes(b.categoryId) : b.categoryId === mapped
+        );
+      }
+    }
+
+    // Apply toggled filters
     if (filters.openNow) {
-      results = results.filter((b) => b.hours === '24 hours' || (b.hours?.includes('AM') && b.hours?.includes('PM')) || false);
+      results = results.filter((b: any) => {
+        const h = (b.hours || '').toLowerCase();
+        return h.includes('24') || h.includes('open');
+      });
     }
     if (filters.verifiedOnly) {
-      results = results.filter((b) => b.verified);
+      results = results.filter((b: any) => b.verified);
     }
     if (filters.rating) {
-      results = [...results].sort((a, b) => b.rating - a.rating);
+      results = [...results].sort((a: any, b: any) => b.rating - a.rating);
     }
     if (filters.distance) {
-      results = [...results].sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
+      results = [...results].sort((a: any, b: any) => {
+        return parseDistanceKm(a.distance) - parseDistanceKm(b.distance);
+      });
     }
 
     return results;
-  }, [searchQuery, searchCategoryFilter, filters, businesses]);
+  }, [localBusinesses, supabaseResults, mappedOsmResults, searchQuery, searchCategoryFilter, activeResultTab, filters]);
 
-  // ── Handlers ────────────────────────────────────────────────────────────
+  // ── Markers for map view ──────────────────────────────────────────────
+  const markerData = useMemo((): MapMarkerData[] => {
+    return filteredResults.map((biz: any) => ({
+      id: biz.id,
+      latitude: biz.latitude,
+      longitude: biz.longitude,
+      emoji: getEmoji(biz.categoryId),
+      color: biz.verified ? '#34A853' : '#EA4335',
+      isSelected: false,
+    }));
+  }, [filteredResults]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────
   const handleSearch = useCallback(
     (query: string) => {
-      if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
-
       const category = SEARCH_CATEGORIES.find((c) => c.name === query);
       if (category) {
-        // Special case: Pharmacies set searchQuery='pharmacy' (store clears categoryFilter)
-        if (category.categoryId === 'health' && category.name === 'Pharmacies') {
-          setSearchQuery('pharmacy');
-        } else {
-          setSearchCategoryFilter(category.categoryId);
-        }
-        setLoading(true);
-        loadingTimeoutRef.current = setTimeout(() => setLoading(false), 300);
+        setSearchCategoryFilter(category.categoryId);
+        setSearchQuery('');
         return;
       }
 
       setSearchQuery(query);
-      setLoading(true);
-      loadingTimeoutRef.current = setTimeout(() => setLoading(false), 300);
+      setSearchCategoryFilter('');
 
       if (query.trim() && !recentSearches.includes(query.trim())) {
         setRecentSearches((prev) => [query.trim(), ...prev.slice(0, 4)]);
@@ -196,6 +409,8 @@ export const SearchScreen: React.FC = () => {
     setSearchQuery('');
     setSearchCategoryFilter('');
     setFilters({ distance: false, rating: false, openNow: false, verifiedOnly: false });
+    setOsmResults([]);
+    setActiveResultTab('All');
     inputRef.current?.focus();
   }, [setSearchQuery, setSearchCategoryFilter]);
 
@@ -203,12 +418,55 @@ export const SearchScreen: React.FC = () => {
     setFilters((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
+  // ── Directions button (opens Google Maps) ───────────────────────────
+  const openDirections = useCallback((biz: any) => {
+    const lat = biz.latitude;
+    const lng = biz.longitude;
+    const label = encodeURIComponent(biz.name || 'Destination');
+    if (Platform.OS === 'ios') {
+      Linking.openURL(`maps://app?daddr=${lat},${lng}&q=${label}`).catch(() => {
+        Linking.openURL(`https://maps.google.com/maps?daddr=${lat},${lng}`);
+      });
+    } else {
+      Linking.openURL(`https://maps.google.com/maps?daddr=${lat},${lng}&q=${label}`);
+    }
+    Vibration.vibrate(10);
+  }, []);
+
+  // ── Call button ─────────────────────────────────────────────────────
+  const callBusiness = useCallback((phone?: string) => {
+    if (phone) {
+      Linking.openURL(`tel:${phone}`);
+    }
+  }, []);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 1200);
+  }, []);
+
   const hasQuery = searchQuery.trim().length > 0 || searchCategoryFilter.length > 0;
+
+  // ── Indicate when Supabase + OSM are both being searched ─────────────
+  const isSearching = isSearchingOsm;
+
+  // ── Mini Map initial region ─────────────────────────────────────────
+  const mapInitialRegion = useMemo((): Region => {
+    if (userLocation) {
+      return {
+        latitude: userLocation.latitude,
+        longitude: userLocation.longitude,
+        latitudeDelta: 0.05,
+        longitudeDelta: 0.05,
+      };
+    }
+    return { latitude: 9.02, longitude: 38.74, latitudeDelta: 0.08, longitudeDelta: 0.08 };
+  }, [userLocation]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
       {/* ════════════════════════════════════════════════════════════════
-          SEARCH BAR (Always Fixed at Top)
+          SEARCH BAR (Fixed at Top)
          ════════════════════════════════════════════════════════════════ */}
       <View style={[styles.header, { paddingTop: insets.top + SPACING.lg, backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
         <View style={[styles.searchInputContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -226,7 +484,7 @@ export const SearchScreen: React.FC = () => {
               }
               handleSearch(text);
             }}
-            autoFocus
+            autoFocus={false}
             returnKeyType="search"
             onSubmitEditing={() => Keyboard.dismiss()}
           />
@@ -248,9 +506,7 @@ export const SearchScreen: React.FC = () => {
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh}
             tintColor={colors.primary}
             colors={[colors.primary, colors.accent, colors.violet]}
             progressBackgroundColor={colors.card}
@@ -259,7 +515,7 @@ export const SearchScreen: React.FC = () => {
       >
         {!hasQuery ? (
           // ════════════════════════════════════════════════════════════════
-          // EMPTY STATE — Show examples, recent, trending, categories
+          // EMPTY STATE — Examples, Recent, Trending, Categories
           // ════════════════════════════════════════════════════════════════
           <View>
             {/* Example Search Chips */}
@@ -285,24 +541,28 @@ export const SearchScreen: React.FC = () => {
                   <Text style={[styles.clearLink, { color: colors.primary }]}>Clear</Text>
                 </TouchableOpacity>
               </View>
-              {recentSearches.map((search, idx) => (
-                <TouchableOpacity
-                  key={idx}
-                  onPress={() => handleSearch(search)}
-                  style={[styles.recentItem, { backgroundColor: colors.card, borderColor: colors.border }]}
-                >
-                  <View style={[styles.recentIconWrap, { backgroundColor: colors.primaryGlow }]}>
-                    <Text style={styles.recentIcon}>
-                      {search.toLowerCase().includes('coffee') ? '☕' :
-                       search.toLowerCase().includes('hotel') ? '🏨' :
-                       search.toLowerCase().includes('food') ? '🍽️' :
-                       search.toLowerCase().includes('pharmacy') ? '💊' : '📍'}
-                    </Text>
-                  </View>
-                  <Text style={[styles.recentText, { color: colors.text }]}>{search}</Text>
-                  <Ionicons name="arrow-forward" size={16} color={colors.textMuted} />
-                </TouchableOpacity>
-              ))}
+              {recentSearches.length === 0 ? (
+                <Text style={[styles.emptyRecent, { color: colors.textMuted }]}>No recent searches</Text>
+              ) : (
+                recentSearches.map((search, idx) => (
+                  <TouchableOpacity
+                    key={idx}
+                    onPress={() => handleSearch(search)}
+                    style={[styles.recentItem, { backgroundColor: colors.card, borderColor: colors.border }]}
+                  >
+                    <View style={[styles.recentIconWrap, { backgroundColor: colors.primaryGlow }]}>
+                      <Text style={styles.recentIcon}>
+                        {search.toLowerCase().includes('coffee') ? '☕' :
+                         search.toLowerCase().includes('hotel') ? '🏨' :
+                         search.toLowerCase().includes('food') ? '🍽️' :
+                         search.toLowerCase().includes('pharmacy') ? '💊' : '📍'}
+                      </Text>
+                    </View>
+                    <Text style={[styles.recentText, { color: colors.text }]}>{search}</Text>
+                    <Ionicons name="arrow-forward" size={16} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ))
+              )}
             </View>
 
             {/* Trending Searches */}
@@ -327,17 +587,43 @@ export const SearchScreen: React.FC = () => {
             <View style={styles.section}>
               <Text style={[styles.sectionTitle, { color: colors.text }]}>Categories</Text>
               <View style={styles.catGrid}>
-                {SEARCH_CATEGORIES.map((cat, idx) => (
-                  <TouchableOpacity
-                    key={idx}
-                    onPress={() => handleSearch(cat.name)}
-                    style={[styles.catItem, { backgroundColor: colors.card, borderColor: colors.border }]}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.catIcon}>{cat.icon}</Text>
-                    <Text style={[styles.catName, { color: colors.textSub }]}>{cat.name}</Text>
-                  </TouchableOpacity>
-                ))}
+                {SEARCH_CATEGORIES.map((cat, idx) => {
+                  const isActive = searchCategoryFilter === cat.categoryId;
+                  return (
+                    <TouchableOpacity
+                      key={idx}
+                      onPress={() => {
+                        if (isActive) {
+                          setSearchCategoryFilter('');
+                        } else {
+                          setSearchCategoryFilter(cat.categoryId);
+                        }
+                      }}
+                      style={[
+                        styles.catItem,
+                        {
+                          backgroundColor: isActive ? colors.primaryGlow : colors.card,
+                          borderColor: isActive ? colors.primary + '66' : colors.border,
+                        },
+                      ]}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.catIcon}>{cat.icon}</Text>
+                      <Text style={[
+                        styles.catName,
+                        { color: isActive ? colors.primary : colors.textSub },
+                        isActive && { fontWeight: '700' },
+                      ]}>
+                        {cat.name}
+                      </Text>
+                      {isActive && (
+                        <View style={[styles.catActiveBadge, { backgroundColor: colors.primary }]}>
+                          <Ionicons name="checkmark" size={8} color="#FFF" />
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
             </View>
           </View>
@@ -348,18 +634,29 @@ export const SearchScreen: React.FC = () => {
           <View>
             {/* Result Tabs */}
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabRow}>
-              {RESULT_TABS.map((tab) => {
+              {['All', 'Places', 'Restaurants', 'Hotels', 'Services', 'Photos'].map((tab) => {
                 const isActive = activeResultTab === tab;
+                const tabCount = tab === 'All' ? filteredResults.length
+                  : tab === 'Restaurants' ? filteredResults.filter((b: any) => b.categoryId === 'food').length
+                  : tab === 'Hotels' ? filteredResults.filter((b: any) => b.categoryId === 'hotel').length
+                  : tab === 'Services' ? filteredResults.filter((b: any) => ['health', 'finance', 'edu', 'gym'].includes(b.categoryId)).length
+                  : tab === 'Photos' ? filteredResults.filter((b: any) => b.image).length
+                  : filteredResults.length;
                 return (
                   <TouchableOpacity
                     key={tab}
                     onPress={() => setActiveResultTab(tab)}
-                    style={[styles.tabItem, isActive && { backgroundColor: colors.primaryGlow, borderColor: colors.primary + '44' }]}
+                    style={[
+                      styles.tabItem,
+                      isActive && { backgroundColor: colors.primaryGlow, borderColor: colors.primary + '44' },
+                    ]}
                   >
-                    <Text style={[styles.tabText, { color: isActive ? colors.primary : colors.textMuted },
+                    <Text style={[
+                      styles.tabText,
+                      { color: isActive ? colors.primary : colors.textMuted },
                       isActive && { fontWeight: '800' },
                     ]}>
-                      {tab}
+                      {tab} {tabCount > 0 && `(${tabCount})`}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -367,154 +664,159 @@ export const SearchScreen: React.FC = () => {
             </ScrollView>
 
             {/* Filter Chips + View Switcher */}
-            {!loading && (
-              <View style={styles.filterRow}>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipsRow}>
-                  {[
-                    { key: 'distance' as FilterKey, label: '📍 Distance' },
-                    { key: 'rating' as FilterKey, label: '⭐ Rating' },
-                    { key: 'openNow' as FilterKey, label: '🟢 Open Now' },
-                    { key: 'verifiedOnly' as FilterKey, label: '✓ Verified Only' },
-                  ].map((f) => (
-                    <TouchableOpacity
-                      key={f.key}
-                      onPress={() => toggleFilter(f.key)}
-                      style={[
-                        styles.filterChip,
-                        { backgroundColor: colors.card, borderColor: colors.border },
-                        filters[f.key] && { backgroundColor: colors.primaryGlow, borderColor: colors.primary + '66' },
-                      ]}
-                    >
-                      <Text style={[
-                        styles.filterChipText,
-                        { color: colors.textSub },
-                        filters[f.key] && { color: colors.primary, fontWeight: '700' },
-                      ]}>
-                        {f.label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
+            <View style={styles.filterRow}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipsRow}>
+                {[
+                  { key: 'distance' as FilterKey, label: '📍 Distance' },
+                  { key: 'rating' as FilterKey, label: '⭐ Rating' },
+                  { key: 'openNow' as FilterKey, label: '🟢 Open Now' },
+                  { key: 'verifiedOnly' as FilterKey, label: '✓ Verified Only' },
+                ].map((f) => (
+                  <TouchableOpacity
+                    key={f.key}
+                    onPress={() => toggleFilter(f.key)}
+                    style={[
+                      styles.filterChip,
+                      { backgroundColor: colors.card, borderColor: colors.border },
+                      filters[f.key] && { backgroundColor: colors.primaryGlow, borderColor: colors.primary + '66' },
+                    ]}
+                  >
+                    <Text style={[
+                      styles.filterChipText,
+                      { color: colors.textSub },
+                      filters[f.key] && { color: colors.primary, fontWeight: '700' },
+                    ]}>
+                      {f.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
 
-                {/* View Switcher */}
-                <View style={[styles.viewSwitcher, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                  <TouchableOpacity
-                    onPress={() => setViewMode('list')}
-                    style={[styles.viewBtn, viewMode === 'list' && { backgroundColor: colors.primary }]}
-                  >
-                    <Ionicons name="list" size={16} color={viewMode === 'list' ? '#FFF' : colors.textMuted} />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={() => setViewMode('map')}
-                    style={[styles.viewBtn, viewMode === 'map' && { backgroundColor: colors.primary }]}
-                  >
-                    <Ionicons name="map" size={16} color={viewMode === 'map' ? '#FFF' : colors.textMuted} />
-                  </TouchableOpacity>
-                </View>
+              {/* View Switcher */}
+              <View style={[styles.viewSwitcher, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                <TouchableOpacity
+                  onPress={() => setViewMode('list')}
+                  style={[styles.viewBtn, viewMode === 'list' && { backgroundColor: colors.primary }]}
+                >
+                  <Ionicons name="list" size={16} color={viewMode === 'list' ? '#FFF' : colors.textMuted} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setViewMode('map')}
+                  style={[styles.viewBtn, viewMode === 'map' && { backgroundColor: colors.primary }]}
+                >
+                  <Ionicons name="map" size={16} color={viewMode === 'map' ? '#FFF' : colors.textMuted} />
+                </TouchableOpacity>
               </View>
-            )}
+            </View>
 
             {/* Results Header */}
-            {!loading && (
+            {filteredResults.length > 0 && (
               <View style={styles.resultsHeader}>
                 <Text style={[styles.resultsCount, { color: colors.textSub }]}>
                   {filteredResults.length} result{filteredResults.length !== 1 ? 's' : ''}
+                  {isSearching && searchQuery.trim() ? ' • Searching more...' : ''}
                 </Text>
               </View>
             )}
 
-            {/* Loading / Results / Empty */}
-            {loading ? (
-              <View style={styles.skeletonWrap}>
-                {[1, 2, 3, 4].map((i) => (
-                  <SkeletonCard key={i} colors={colors} />
-                ))}
-              </View>
-            ) : viewMode === 'list' && filteredResults.length > 0 ? (
-              filteredResults.map((business) => (
-                <View key={business.id} style={[styles.resultCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                  <TouchableOpacity
-                    onPress={() => router.push(`/business/${business.id}`)}
-                    activeOpacity={0.85}
-                  >
-                    <View style={styles.resultCardInner}>
-                      <Image source={{ uri: business.image }} style={styles.resultImg} resizeMode="cover" />
-                      <View style={styles.resultInfo}>
-                        <View style={styles.resultTop}>
-                          <Text style={[styles.resultName, { color: colors.text }]} numberOfLines={1}>
-                            {business.name}
-                          </Text>
-                          {business.verified && (
-                            <Ionicons name="checkmark-circle" size={16} color={colors.accent} />
-                          )}
-                        </View>
-                        <Text style={[styles.resultCategory, { color: colors.textMuted }]}>{business.category}</Text>
-                        <View style={styles.resultMeta}>
-                          <View style={styles.resultRating}>
-                            <Ionicons name="star" size={12} color={colors.gold} />
-                            <Text style={[styles.resultScore, { color: colors.text }]}>{business.rating.toFixed(1)}</Text>
-                            <Text style={[styles.resultReviews, { color: colors.textMuted }]}>
-                              ({business.reviews})
-                            </Text>
-                          </View>
-                          <Text style={[styles.resultDot, { color: colors.textMuted }]}> • </Text>
-                          <Ionicons name="location" size={11} color={colors.textMuted} />
-                          <Text style={[styles.resultDist, { color: colors.textMuted }]}>{business.distance}</Text>
-                        </View>
-                        {business.hours?.includes('24') || business.hours?.includes('AM') ? (
-                          <View style={[styles.openBadge, { backgroundColor: colors.accentGlow }]}>
-                            <View style={[styles.openDot, { backgroundColor: colors.accent }]} />
-                            <Text style={[styles.openText, { color: colors.accent }]}>Open now</Text>
-                            <Text style={[styles.openHours, { color: colors.textMuted }]}>
-                              {business.hours?.includes('24') ? 'Open 24 hours' : business.hours?.split(',').slice(0, 1).join('')}
-                            </Text>
-                          </View>
-                        ) : null}
-                      </View>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Action Buttons */}
-                  <View style={[styles.resultActions, { borderTopColor: colors.border }]}>
-                    <TouchableOpacity style={styles.actionBtn}>
-                      <Ionicons name="navigate-outline" size={16} color={colors.primary} />
-                      <Text style={[styles.actionText, { color: colors.primary }]}>Directions</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.actionBtn}>
-                      <Ionicons name="call-outline" size={16} color={colors.accent} />
-                      <Text style={[styles.actionText, { color: colors.accent }]}>Call</Text>
-                    </TouchableOpacity>
+            {/* Results / Empty */}
+            {viewMode === 'list' && filteredResults.length > 0 ? (
+              filteredResults.map((business) => {
+                const isSaved = savedPlaces.includes(business.id);
+                return (
+                  <View key={business.id} style={[styles.resultCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
                     <TouchableOpacity
-                      onPress={() => toggleSavedPlace(business.id)}
-                      style={styles.actionBtn}
+                      onPress={() => router.push(`/business/${business.id}`)}
+                      activeOpacity={0.85}
                     >
-                      <Ionicons
-                        name={savedPlaces.includes(business.id) ? 'heart' : 'heart-outline'}
-                        size={16}
-                        color={savedPlaces.includes(business.id) ? colors.danger : colors.textMuted}
-                      />
-                      <Text style={[styles.actionText, { color: savedPlaces.includes(business.id) ? colors.danger : colors.textMuted }]}>
-                        {savedPlaces.includes(business.id) ? 'Saved' : 'Save'}
-                      </Text>
+                      <View style={styles.resultCardInner}>
+                        <Image source={{ uri: business.image }} style={styles.resultImg} resizeMode="cover" />
+                        <View style={styles.resultInfo}>
+                          <View style={styles.resultTop}>
+                            <Text style={[styles.resultName, { color: colors.text }]} numberOfLines={1}>
+                              {business.name}
+                            </Text>
+                            {business.verified && (
+                              <Ionicons name="checkmark-circle" size={16} color={colors.accent} />
+                            )}
+                          </View>
+                          <Text style={[styles.resultCategory, { color: colors.textMuted }]}>
+                            {getEmoji(business.categoryId)} {business.category}
+                          </Text>
+                          <View style={styles.resultMeta}>
+                            <View style={styles.resultRating}>
+                              <Ionicons name="star" size={12} color={colors.gold} />
+                              <Text style={[styles.resultScore, { color: colors.text }]}>{business.rating?.toFixed(1)}</Text>
+                              <Text style={[styles.resultReviews, { color: colors.textMuted }]}>
+                                ({business.reviews})
+                              </Text>
+                            </View>
+                            <Text style={[styles.resultDot, { color: colors.textMuted }]}> • </Text>
+                            <Ionicons name="location" size={11} color={colors.textMuted} />
+                            <Text style={[styles.resultDist, { color: colors.textMuted }]}>{business.distance}</Text>
+                          </View>
+                          {business.hours?.includes('24') || business.hours?.includes('Open') ? (
+                            <View style={[styles.openBadge, { backgroundColor: colors.accentGlow }]}>
+                              <View style={[styles.openDot, { backgroundColor: colors.accent }]} />
+                              <Text style={[styles.openText, { color: colors.accent }]}>Open now</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
                     </TouchableOpacity>
+
+                    {/* Action Buttons — FULLY FUNCTIONAL */}
+                    <View style={[styles.resultActions, { borderTopColor: colors.border }]}>
+                      <TouchableOpacity
+                        onPress={() => openDirections(business)}
+                        style={styles.actionBtn}
+                      >
+                        <Ionicons name="navigate-outline" size={16} color={colors.primary} />
+                        <Text style={[styles.actionText, { color: colors.primary }]}>Directions</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => callBusiness(business.phone)}
+                        style={styles.actionBtn}
+                      >
+                        <Ionicons name="call-outline" size={16} color={colors.accent} />
+                        <Text style={[styles.actionText, { color: colors.accent }]}>Call</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => toggleSavedPlace(business.id)}
+                        style={styles.actionBtn}
+                      >
+                        <Ionicons
+                          name={isSaved ? 'heart' : 'heart-outline'}
+                          size={16}
+                          color={isSaved ? colors.danger : colors.textMuted}
+                        />
+                        <Text style={[styles.actionText, { color: isSaved ? colors.danger : colors.textMuted }]}>
+                          {isSaved ? 'Saved' : 'Save'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
+                );
+              })
+            ) : viewMode === 'map' && filteredResults.length > 0 ? (
+              /* REAL MAP VIEW — replaces fake placeholder */
+              <View style={[styles.mapContainer, { borderColor: colors.border }]}>
+                <WebMapView
+                  ref={miniMapRef}
+                  style={styles.mapWebView}
+                  initialRegion={mapInitialRegion}
+                  markers={markerData}
+                  showsUserLocation={!!userLocation}
+                />
+                <View style={[styles.mapOverlay, { backgroundColor: colors.glassBg }]}>
+                  <Ionicons name="location" size={13} color={colors.primary} />
+                  <Text style={[styles.mapOverlayText, { color: colors.text }]}>
+                    {filteredResults.length} places on map
+                  </Text>
+                  <TouchableOpacity onPress={() => setViewMode('list')}>
+                    <Text style={[styles.mapOverlayLink, { color: colors.primary }]}>List view</Text>
+                  </TouchableOpacity>
                 </View>
-              ))
-            ) : viewMode === 'map' ? (
-              <View style={[styles.mapPlaceholder, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-                <View style={styles.mapGrid}>
-                  {Array.from({ length: 12 }).map((_, i) => (
-                    <View key={i} style={[styles.mapGridLineH, { backgroundColor: colors.primaryGlow, top: `${((i + 1) / 13) * 100}%` }]} />
-                  ))}
-                  {Array.from({ length: 8 }).map((_, i) => (
-                    <View key={i} style={[styles.mapGridLineV, { backgroundColor: colors.primaryGlow, left: `${((i + 1) / 9) * 100}%` }]} />
-                  ))}
-                </View>
-                <Ionicons name="map" size={48} color={colors.textMuted} />
-                <Text style={[styles.mapPlaceholderText, { color: colors.textSub }]}>Map View</Text>
-                <Text style={[styles.mapPlaceholderSub, { color: colors.textMuted }]}>
-                  {filteredResults.length} places on map
-                </Text>
               </View>
             ) : (
               /* Empty State */
@@ -524,10 +826,12 @@ export const SearchScreen: React.FC = () => {
                 </View>
                 <Text style={[styles.emptyTitle, { color: colors.text }]}>No results found</Text>
                 <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-                  Try different keywords or browse categories
+                  {searchQuery.trim()
+                    ? `No results for "${searchQuery}"`
+                    : 'Try different keywords or browse categories'}
                 </Text>
                 <View style={styles.emptyTips}>
-                  {['Different keywords', 'Nearby areas', 'Broader categories'].map((tip, i) => (
+                  {['Try different keywords', 'Browse nearby areas', 'Explore broader categories'].map((tip, i) => (
                     <View key={i} style={styles.emptyTipRow}>
                       <Text style={{ color: colors.primary }}>• </Text>
                       <Text style={[styles.emptyTipText, { color: colors.textSub }]}>{tip}</Text>
@@ -535,7 +839,7 @@ export const SearchScreen: React.FC = () => {
                   ))}
                 </View>
                 <TouchableOpacity
-                  onPress={clearSearch}
+                  onPress={() => router.push('/add-place')}
                   style={[styles.emptyBtn, { backgroundColor: colors.primary }]}
                 >
                   <Ionicons name="add" size={18} color="#FFF" />
@@ -544,8 +848,8 @@ export const SearchScreen: React.FC = () => {
               </View>
             )}
 
-            {/* AI Search Section (Phase 2 Placeholder) */}
-            {!loading && filteredResults.length > 0 && (
+            {/* AI Search Section (Phase 2) */}
+            {filteredResults.length > 0 && (
               <View style={[styles.aiSection, { backgroundColor: colors.violetGlow, borderColor: colors.violet + '33' }]}>
                 <View style={styles.aiSectionHeader}>
                   <Ionicons name="sparkles" size={20} color={colors.violet} />
@@ -597,6 +901,7 @@ const styles = StyleSheet.create({
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.lg },
   sectionTitle: { fontSize: 20, fontWeight: '700', letterSpacing: -0.3, marginBottom: SPACING.lg },
   clearLink: { fontSize: 13, fontWeight: '700', marginBottom: SPACING.lg },
+  emptyRecent: { fontSize: 13, fontWeight: '500', fontStyle: 'italic' },
 
   // ── Example Chips ───────────────────────────────────────────────────
   examplesRow: { gap: SPACING.sm, paddingBottom: SPACING.sm },
@@ -628,9 +933,15 @@ const styles = StyleSheet.create({
   catItem: {
     width: '46%', flexGrow: 1, borderRadius: RADIUS.lg,
     paddingVertical: SPACING.lg + 2, alignItems: 'center', borderWidth: 1, gap: SPACING.sm,
+    position: 'relative',
   },
   catIcon: { fontSize: 28 },
   catName: { fontSize: 12, fontWeight: '600' },
+  catActiveBadge: {
+    position: 'absolute', top: 4, right: 4,
+    width: 18, height: 18, borderRadius: 9,
+    alignItems: 'center', justifyContent: 'center',
+  },
 
   // ── Result Tabs ─────────────────────────────────────────────────────
   tabRow: { gap: SPACING.sm, marginBottom: SPACING.lg },
@@ -666,18 +977,23 @@ const styles = StyleSheet.create({
   openBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, alignSelf: 'flex-start', marginTop: 4 },
   openDot: { width: 6, height: 6, borderRadius: 3 },
   openText: { fontSize: 10, fontWeight: '700' },
-  openHours: { fontSize: 10, fontWeight: '500' },
   resultActions: { flexDirection: 'row', borderTopWidth: 1, paddingVertical: SPACING.sm, paddingHorizontal: SPACING.md },
   actionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 4 },
   actionText: { fontSize: 11, fontWeight: '700' },
 
   // ── Map View ────────────────────────────────────────────────────────
-  mapPlaceholder: { borderRadius: RADIUS.xl, height: 280, borderWidth: 1, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative', marginBottom: SPACING.lg },
-  mapGrid: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  mapGridLineH: { position: 'absolute', left: 0, right: 0, height: 1, opacity: 0.4 },
-  mapGridLineV: { position: 'absolute', top: 0, bottom: 0, width: 1, opacity: 0.4 },
-  mapPlaceholderText: { fontSize: 18, fontWeight: '700', marginTop: SPACING.md },
-  mapPlaceholderSub: { fontSize: 13, fontWeight: '500', marginTop: 4 },
+  mapContainer: {
+    borderRadius: RADIUS.xl, height: 320, borderWidth: 1,
+    overflow: 'hidden', marginBottom: SPACING.lg, position: 'relative',
+  },
+  mapWebView: { flex: 1 },
+  mapOverlay: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: SPACING.md, paddingHorizontal: SPACING.lg,
+  },
+  mapOverlayText: { flex: 1, fontSize: 13, fontWeight: '600' },
+  mapOverlayLink: { fontSize: 12, fontWeight: '700' },
 
   // ── Empty State ─────────────────────────────────────────────────────
   emptyState: { alignItems: 'center', paddingVertical: SPACING.xxxl, paddingHorizontal: SPACING.xl },

@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.nexi.locate"
+      "bundleIdentifier": "com.nexi.locate",
+      "config": {
+        "googleMapsApiKey": "AIzaSyB2Nc8a3Qg4IG__s_TOrDU0m1M8ka2-njI"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +22,12 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "package": "com.nexi.locate",
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyB2Nc8a3Qg4IG__s_TOrDU0m1M8ka2-njI"
+        }
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"

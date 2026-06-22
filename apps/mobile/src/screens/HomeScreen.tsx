@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,10 @@ import { BusinessCard } from '../components/BusinessCard';
 import { Button } from '../components/Button';
 import { useAppStore, MOCK_REVIEWS_DATA, MOCK_GALLERY, EARN_OPTIONS } from '../store/appStore';
 import { useTheme, SPACING, RADIUS, TYPOGRAPHY } from '../theme/colors';
+import WebMapView from '../components/WebMapView';
+import type { MapMarkerData, Region } from '../components/WebMapView';
+import * as Location from 'expo-location';
+import { haversineKm, formatDistance } from '../services/dataService';
 
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = width * 0.72;
@@ -43,17 +47,53 @@ const FEATURED = [
   { id: 'f3', name: 'Hyatt Regency', desc: '5-star • City views', image: 'https://images.unsplash.com/photo-1542314831-068cd1dbfeeb?w=400', rating: 4.7, label: 'Sponsored' },
 ];
 
+// ── Category emoji helper ───────────────────────────────────────────────
+const getCatEmoji = (category: string): string => {
+  const lower = category.toLowerCase();
+  if (lower.includes('restaurant') || lower.includes('food')) return '🍽️';
+  if (lower.includes('cafe') || lower.includes('coffee')) return '☕';
+  if (lower.includes('hotel')) return '🏨';
+  if (lower.includes('clinic') || lower.includes('hospital') || lower.includes('health')) return '🏥';
+  if (lower.includes('shop') || lower.includes('mall') || lower.includes('pharmacy')) return '🛍️';
+  if (lower.includes('fuel') || lower.includes('gas')) return '⛽';
+  if (lower.includes('bank') || lower.includes('finance')) return '🏦';
+  if (lower.includes('school') || lower.includes('university')) return '🏫';
+  return '📍';
+};
+
 export const HomeScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { colors, isDark } = useTheme();
   const { user, businesses, savedPlaces, toggleSavedPlace, setSearchQuery, setSearchCategoryFilter } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const miniMapRef = useRef<any>(null);
 
   // ── Computed Data ──────────────────────────────────────────────────────
-  const nearbyPlaces = useMemo(() =>
-    [...businesses].sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance)).slice(0, 8),
-  [businesses]);
+  const nearbyPlaces = useMemo(() => {
+    if (!userLocation) return businesses.slice(0, 8);
+    return [...businesses]
+      .map((b) => ({
+        ...b,
+        distance: formatDistance(haversineKm(
+          userLocation.latitude, userLocation.longitude,
+          b.latitude, b.longitude,
+        )),
+      }))
+      .sort((a, b) => {
+        const da = haversineKm(
+          userLocation.latitude, userLocation.longitude,
+          a.latitude, a.longitude,
+        );
+        const db = haversineKm(
+          userLocation.latitude, userLocation.longitude,
+          b.latitude, b.longitude,
+        );
+        return da - db;
+      })
+      .slice(0, 8);
+  }, [businesses, userLocation]);
 
   const trendingPlaces = useMemo(() =>
     [...businesses].sort((a, b) => b.reviews - a.reviews).slice(0, 8),
@@ -98,6 +138,52 @@ export const HomeScreen: React.FC = () => {
     if (hour < 17) return 'Good afternoon';
     return 'Good evening';
   };
+
+  // ── Location Permission ────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
+          });
+          setUserLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+        }
+      } catch {}
+    })();
+  }, []);
+
+  // Center mini map once GPS is available
+  useEffect(() => {
+    if (userLocation && miniMapRef.current) {
+      miniMapRef.current.animateToRegion({
+        latitude: userLocation.latitude,
+        longitude: userLocation.longitude,
+        latitudeDelta: 0.025,
+        longitudeDelta: 0.025,
+      }, 800);
+    }
+  }, [userLocation]);
+
+  // ── Mini Map Data ──────────────────────────────────────────────────
+  const homeInitialRegion = useMemo((): Region => ({
+    latitude: 9.02,
+    longitude: 38.74,
+    latitudeDelta: 0.025,
+    longitudeDelta: 0.025,
+  }), []);
+
+  const homeMarkerData = useMemo((): MapMarkerData[] =>
+    nearbyPlaces.slice(0, 12).map((biz: any) => ({
+      id: biz.id,
+      latitude: biz.latitude ?? 9.02,
+      longitude: biz.longitude ?? 38.74,
+      emoji: getCatEmoji(biz.category || ''),
+      color: '#4285F4',
+      isSelected: false,
+    })),
+  [nearbyPlaces]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -212,74 +298,41 @@ export const HomeScreen: React.FC = () => {
         </View>
 
         {/* ════════════════════════════════════════════════════════════════
-            SECTION 4: INTERACTIVE MAP PREVIEW
+            SECTION 4: REAL MAP PREVIEW (Leaflet / OpenStreetMap)
            ════════════════════════════════════════════════════════════════ */}
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={[styles.sectionTitle, { color: colors.text }]}>📍 Nearby Places</Text>
-            <TouchableOpacity onPress={() => router.push('/search')}>
-              <Text style={[styles.seeAllText, { color: colors.primary }]}>Open Full Map</Text>
+            <TouchableOpacity onPress={() => router.push('/map')}>
+              <Text style={[styles.seeAllText, { color: colors.primary }]}>Full Map →</Text>
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity
-            onPress={() => router.push('/search')}
-            style={[styles.mapCard, { backgroundColor: colors.surface, borderColor: colors.border }]}
-            activeOpacity={0.9}
-          >
-            {/* Grid overlay to look like a map */}
-            <View style={styles.mapGrid}>
-              {Array.from({ length: 20 }).map((_, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.mapGridLineH,
-                    { backgroundColor: colors.primaryGlow, top: `${((i + 1) / 21) * 100}%` },
-                  ]}
-                />
-              ))}
-              {Array.from({ length: 12 }).map((_, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.mapGridLineV,
-                    { backgroundColor: colors.primaryGlow, left: `${((i + 1) / 13) * 100}%` },
-                  ]}
-                />
-              ))}
-            </View>
-
-            {/* Map pins */}
-            <View style={[styles.mapPin, { top: '25%', left: '30%' }]}>
-              <Ionicons name="location" size={22} color={colors.danger} />
-            </View>
-            <View style={[styles.mapPin, { top: '55%', left: '60%' }]}>
-              <Ionicons name="location" size={18} color={colors.primary} />
-            </View>
-            <View style={[styles.mapPin, { top: '40%', left: '20%' }]}>
-              <Ionicons name="location" size={16} color={colors.accent} />
-            </View>
-            <View style={[styles.mapPin, { top: '70%', left: '45%' }]}>
-              <Ionicons name="location" size={20} color={colors.violet} />
-            </View>
-            <View style={[styles.mapPin, { top: '30%', left: '75%' }]}>
-              <Ionicons name="location" size={14} color={colors.gold} />
-            </View>
-
-            {/* Center pin */}
-            <View style={[styles.mapCenterPin, { backgroundColor: colors.primary }]}>
-              <Ionicons name="navigate" size={20} color="#FFF" />
-            </View>
-
-            {/* Bottom overlay */}
-            <View style={[styles.mapOverlay, { backgroundColor: colors.glassBg }]}>
-              <Ionicons name="location" size={14} color={colors.primary} />
-              <Text style={[styles.mapOverlayText, { color: colors.text }]}>
+          <View style={[styles.miniMapCard, { borderColor: colors.border }]}>
+            <WebMapView
+              ref={miniMapRef}
+              style={styles.miniMap}
+              initialRegion={homeInitialRegion}
+              markers={homeMarkerData}
+              showsUserLocation={true}
+            />
+            {/* Floating "Open Full Map" button */}
+            <TouchableOpacity
+              onPress={() => router.push('/map')}
+              style={[styles.miniMapBtn, { backgroundColor: colors.primary }]}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="expand" size={13} color="#FFF" />
+              <Text style={styles.miniMapBtnText}>Open Full Map</Text>
+            </TouchableOpacity>
+            {/* Places count badge at bottom */}
+            <View style={[styles.miniMapBadge, { backgroundColor: colors.glassBg }]}>
+              <Ionicons name="location" size={13} color={colors.primary} />
+              <Text style={[styles.miniMapBadgeText, { color: colors.text }]}>
                 {nearbyPlaces.length} places near you
               </Text>
-              <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
             </View>
-          </TouchableOpacity>
+          </View>
         </View>
 
         {/* ════════════════════════════════════════════════════════════════
@@ -288,7 +341,7 @@ export const HomeScreen: React.FC = () => {
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={[styles.sectionTitle, { color: colors.text }]}>Near You</Text>
-            <TouchableOpacity onPress={handleSearchPress}>
+            <TouchableOpacity onPress={() => router.push('/map')}>
               <Text style={[styles.seeAllText, { color: colors.primary }]}>See all</Text>
             </TouchableOpacity>
           </View>
@@ -633,25 +686,24 @@ const styles = StyleSheet.create({
   catIcon: { fontSize: 24, marginBottom: 4 },
   catLabel: { fontSize: 11, fontWeight: '600' },
 
-  // ── Map ─────────────────────────────────────────────────────────────
-  mapCard: {
-    borderRadius: RADIUS.xl, height: 180, overflow: 'hidden',
-    borderWidth: 1, position: 'relative', justifyContent: 'center', alignItems: 'center',
+  // ── Mini Map ──────────────────────────────────────────────────────────
+  miniMapCard: {
+    borderRadius: RADIUS.xl, height: 220, overflow: 'hidden',
+    borderWidth: 1, position: 'relative',
   },
-  mapGrid: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  mapGridLineH: { position: 'absolute', left: 0, right: 0, height: 1, opacity: 0.4 },
-  mapGridLineV: { position: 'absolute', top: 0, bottom: 0, width: 1, opacity: 0.4 },
-  mapPin: { position: 'absolute' },
-  mapCenterPin: {
-    width: 44, height: 44, borderRadius: 22,
-    alignItems: 'center', justifyContent: 'center',
+  miniMap: { flex: 1, borderRadius: RADIUS.xl },
+  miniMapBtn: {
+    position: 'absolute', top: SPACING.md, right: SPACING.md,
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    borderRadius: RADIUS.lg, paddingHorizontal: SPACING.md + 2, paddingVertical: SPACING.sm,
   },
-  mapOverlay: {
+  miniMapBtnText: { fontSize: 12, fontWeight: '700', color: '#FFF' },
+  miniMapBadge: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingVertical: SPACING.md, paddingHorizontal: SPACING.lg,
   },
-  mapOverlayText: { flex: 1, fontSize: 13, fontWeight: '600' },
+  miniMapBadgeText: { flex: 1, fontSize: 13, fontWeight: '600' },
 
   // ── Horizontal Card ─────────────────────────────────────────────────
   horizScroll: { gap: SPACING.lg, paddingHorizontal: SPACING.xl },

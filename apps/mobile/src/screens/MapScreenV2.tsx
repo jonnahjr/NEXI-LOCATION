@@ -5,6 +5,7 @@ import {
     Animated,
     Dimensions,
     Image,
+    Linking,
     PanResponder,
     Platform,
     ScrollView,
@@ -14,12 +15,16 @@ import {
     TouchableOpacity,
     View,
     Vibration,
+    Alert,
+    Share,
 } from 'react-native';
-import MapView, { Marker, Region } from 'react-native-maps';
+import WebMapView, { WebMapViewRef, MapMarkerData, Region, MapLayerType } from '../components/WebMapView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { useAppStore, Business } from '../store/appStore';
 import { RADIUS, SPACING, useTheme } from '../theme/colors';
+import { searchPlaces, mapPlaceTypeToCategory, getCategoryLabel, getPhotoUrl } from '../services/osmPlaces';
+import type { PlaceResult } from '../services/osmPlaces';
 
 const { width, height } = Dimensions.get('window');
 const MAP_HEIGHT = height;
@@ -58,11 +63,29 @@ const SORT_OPTIONS = [
   { id: 'newest', label: 'Newest', icon: '🆕' },
 ];
 
-// ── Travel Modes ──────────────────────────────────────────────────────────
-const TRAVEL_MODES = [
-  { id: 'walking', icon: '🚶', label: 'Walk' },
-  { id: 'driving', icon: '🚗', label: 'Drive' },
-  { id: 'cycling', icon: '🚲', label: 'Cycle' },
+// ── Haversine Distance Calculation (real GPS distance) ───────────────────
+// Uses the haversine formula to calculate real distance between two GPS coordinates
+function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371; // Earth's radius in km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// ── Map Layer Options ─────────────────────────────────────────────────────
+const MAP_LAYERS: { id: MapLayerType; icon: string; label: string; desc: string }[] = [
+  { id: 'standard', icon: '🗺️', label: 'Standard', desc: 'Default street map' },
+  { id: 'light', icon: '☀️', label: 'Light', desc: 'Clean light theme' },
+  { id: 'dark', icon: '🌙', label: 'Dark', desc: 'Dark mode map' },
+  { id: 'satellite', icon: '🛰️', label: 'Satellite', desc: 'Satellite imagery' },
+  { id: 'terrain', icon: '⛰️', label: 'Terrain', desc: 'Topographic view' },
 ];
 
 // ── Simple Clustering Algorithm ───────────────────────────────────────────
@@ -123,8 +146,8 @@ function clusterMarkers(points: Business[], region: Region, gridSize: number = 0
 export const MapScreenV2: React.FC = () => {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { colors, isDark, mode } = useTheme();
-  const { businesses, savedPlaces, toggleSavedPlace, isSaved } = useAppStore();
+  const { colors, isDark } = useTheme();
+  const { businesses, savedPlaces, toggleSavedPlace } = useAppStore();
 
   // ── Core State ──────────────────────────────────────────────────────────
   const [searchText, setSearchText] = useState('');
@@ -137,19 +160,23 @@ export const MapScreenV2: React.FC = () => {
   const [aiQuery, setAiQuery] = useState('');
   const [activeDiscovery, setActiveDiscovery] = useState<string | null>(null);
   const [showSavedLayer, setShowSavedLayer] = useState(false);
-  const [showNavMode, setShowNavMode] = useState(false);
-  const [travelMode, setTravelMode] = useState('driving');
+  const [showLayerPanel, setShowLayerPanel] = useState(false);
+  const [currentLayer, setCurrentLayer] = useState<MapLayerType>('dark');
   const [isOffline, setIsOffline] = useState(false);
   const [sortBy, setSortBy] = useState('distance');
-  const [filterDistance, setFilterDistance] = useState<number>(10);
+  const [filterDistance, setFilterDistance] = useState<number>(50); // Default to 50 (no filter) so we can see all places
   const [filterOpenNow, setFilterOpenNow] = useState(false);
   const [filterVerified, setFilterVerified] = useState(false);
   const [filterRatingMin, setFilterRatingMin] = useState(0);
   const [pinPreviewBiz, setPinPreviewBiz] = useState<typeof businesses[0] | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [hasFetchedNearby, setHasFetchedNearby] = useState(false);
+  const [apiResults, setApiResults] = useState<PlaceResult[]>([]);
+  const [showTraffic, setShowTraffic] = useState(false);
+  const [isSearchingApi, setIsSearchingApi] = useState(false);
 
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<WebMapViewRef>(null);
   const searchInputRef = useRef<TextInput>(null);
   const sheetAnim = useRef(new Animated.Value(0)).current;
   const sheetPanY = useRef(new Animated.Value(0)).current;
@@ -207,111 +234,355 @@ export const MapScreenV2: React.FC = () => {
     }),
   ).current;
 
-  // ── Filtered & Sorted Businesses ────────────────────────────────────────
+  // ── Real GPS distance helper ───────────────────────────────────────────
+  const getRealDistance = useCallback((lat: number, lng: number): string => {
+    if (!userLocation) return '— km';
+    const dist = haversineDistance(userLocation.latitude, userLocation.longitude, lat, lng);
+    if (dist < 1) return `${(dist * 1000).toFixed(0)} m`;
+    return `${dist.toFixed(1)} km`;
+  }, [userLocation]);
+
+  // ── Local businesses from Supabase, sorted by real GPS distance ─────
+  const localBusinesses = useMemo(() => {
+    if (!userLocation) return businesses;
+    return [...businesses]
+      .map((b) => ({
+        ...b,
+        distance: getRealDistance(b.latitude, b.longitude),
+      }))
+      .sort((a, b) => {
+        const da = haversineDistance(
+          userLocation.latitude, userLocation.longitude,
+          a.latitude, a.longitude,
+        );
+        const db = haversineDistance(
+          userLocation.latitude, userLocation.longitude,
+          b.latitude, b.longitude,
+        );
+        return da - db;
+      });
+  }, [businesses, userLocation, getRealDistance]);
+
+  // ── Map Google Places API results to Business-like objects ─────────────
+  const mappedApiResults = useMemo(() => {
+    return apiResults.map((place) => {
+      const lat = place.geometry.location.lat;
+      const lng = place.geometry.location.lng;
+      const distance = getRealDistance(lat, lng);
+      
+      return {
+        id: place.place_id,
+        name: place.name,
+        category: getCategoryLabel(place.types || []),
+        categoryId: mapPlaceTypeToCategory(place.types || []),
+        rating: place.rating || 0,
+        reviews: place.user_ratings_total || 0,
+        distance,
+        latitude: lat,
+        longitude: lng,
+        image: place.photos?.[0]
+          ? getPhotoUrl(place.photos[0].photo_reference, 400)
+          : 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=400',
+        verified: place.business_status === 'OPERATIONAL',
+        description: place.formatted_address || place.vicinity || '',
+        hours: place.opening_hours?.open_now ? 'Open Now (AM)' : undefined,
+        address: place.formatted_address || place.vicinity || '',
+      };
+    });
+  }, [apiResults, getRealDistance]);
+
+  // ── Filtered & Sorted Businesses ───────────────────────────────────
   const filteredBusinesses = useMemo(() => {
-    let results = businesses;
+    const hasSearchText = searchText.trim().length > 0;
+    let results: any[];
+    
+    if (hasSearchText) {
+      // If user typed a search, show OSM results + local results that match the search (already filtered in dataService)
+      results = [...localBusinesses, ...mappedApiResults];
+    } else {
+      // No search text: show all local businesses + any nearby auto-fetched OSM places
+      results = [...localBusinesses, ...mappedApiResults];
+    }
+    
+    // Deduplicate by ID just in case
+    const uniqueIds = new Set();
+    results = results.filter(b => {
+      if (uniqueIds.has(b.id)) return false;
+      uniqueIds.add(b.id);
+      return true;
+    });
 
-    // Category filter
+    // Category filter (applies to both local and API results)
     if (activeFilter !== 'all') {
-      results = results.filter((b) => b.categoryId === activeFilter);
+      results = results.filter((b: any) => b.categoryId === activeFilter);
     }
 
-    // Discovery layer
-    if (activeDiscovery === 'trending') {
-      results = [...results].sort((a, b) => b.reviews - a.reviews);
-    } else if (activeDiscovery === 'top') {
-      results = [...results].sort((a, b) => b.rating - a.rating);
-    } else if (activeDiscovery === 'new') {
-      results = results.slice(0, 20);
-    } else if (activeDiscovery === 'reviewed') {
-      results = [...results].sort((a, b) => b.reviews - a.reviews);
+    // Discovery layer (local data only)
+    if (!hasSearchText) {
+      if (activeDiscovery === 'trending') {
+        results = [...results].sort((a: any, b: any) => b.reviews - a.reviews);
+      } else if (activeDiscovery === 'top') {
+        results = [...results].sort((a: any, b: any) => b.rating - a.rating);
+      } else if (activeDiscovery === 'new') {
+        results = results.slice(0, 20);
+      } else if (activeDiscovery === 'reviewed') {
+        results = [...results].sort((a: any, b: any) => b.reviews - a.reviews);
+      }
     }
 
-    // Search text
-    if (searchText.trim()) {
-      const q = searchText.toLowerCase();
-      results = results.filter(
-        (b) =>
-          b.name.toLowerCase().includes(q) ||
-          b.category.toLowerCase().includes(q) ||
-          b.address.toLowerCase().includes(q),
-      );
-    }
+
 
     // Filter: Open Now
     if (filterOpenNow) {
-      results = results.filter((b) => b.hours?.includes('24') || b.hours?.includes('AM'));
+      results = results.filter((b: any) => b.hours?.includes('24') || b.hours?.includes('AM'));
     }
 
     // Filter: Verified Only
     if (filterVerified) {
-      results = results.filter((b) => b.verified);
+      results = results.filter((b: any) => b.verified);
     }
 
     // Filter: Rating minimum
     if (filterRatingMin > 0) {
-      results = results.filter((b) => b.rating >= filterRatingMin);
+      results = results.filter((b: any) => b.rating >= filterRatingMin);
     }
 
-    // Filter: Distance (simulated)
-    if (filterDistance < 10) {
-      const distKm = filterDistance;
-      results = results.filter((b) => parseFloat(b.distance) <= distKm);
+    // Helper: parse distance string like "1.2 km" or "350 m" to km value
+    const parseDistanceKm = (d: string): number => {
+      if (!d || d === '— km') return 999;
+      const val = parseFloat(d);
+      if (isNaN(val)) return 999;
+      if (d.includes(' m')) return val / 1000;
+      return val; // already in km
+    };
+
+    // Filter: Distance
+    if (filterDistance < 50) {
+      results = results.filter((b: any) => {
+        const dist = parseDistanceKm(b.distance);
+        return dist === 999 || dist <= filterDistance; // Don't filter out if location is unknown
+      });
     }
 
-    // Sort
+    // Sort (applies to both)
     if (sortBy === 'distance') {
-      results = [...results].sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
+      results = [...results].sort((a: any, b: any) => {
+        return parseDistanceKm(a.distance) - parseDistanceKm(b.distance);
+      });
     } else if (sortBy === 'rating') {
-      results = [...results].sort((a, b) => b.rating - a.rating);
+      results = [...results].sort((a: any, b: any) => b.rating - a.rating);
     } else if (sortBy === 'popularity') {
-      results = [...results].sort((a, b) => b.reviews - a.reviews);
+      results = [...results].sort((a: any, b: any) => b.reviews - a.reviews);
     }
 
     return results;
-  }, [businesses, activeFilter, activeDiscovery, searchText, filterOpenNow, filterVerified, filterRatingMin, filterDistance, sortBy]);
+  }, [localBusinesses, activeFilter, activeDiscovery, searchText, filterOpenNow, filterVerified, filterRatingMin, filterDistance, sortBy, mappedApiResults, getRealDistance]);
 
   // ── Saved Places Set (O(1) lookups) ────────────────────────────────────
   const savedSet = useMemo(() => new Set(savedPlaces), [savedPlaces]);
 
   // ── Clustered Markers ───────────────────────────────────────────────────
+  // User requested to remove clustering (blue circles with numbers)
   const clusteredMarkers = useMemo(() => {
-    if (!currentRegion) return filteredBusinesses;
-    // Skip clustering when zoomed in close (latitudeDelta < 0.01)
-    if (currentRegion.latitudeDelta < 0.01) return filteredBusinesses;
-    return clusterMarkers(filteredBusinesses, currentRegion, 0.015);
-  }, [filteredBusinesses, currentRegion]);
+    return filteredBusinesses;
+  }, [filteredBusinesses]);
+
+  // ── Share business via native share sheet ────────────────────────────
+  const shareBusiness = useCallback(async (biz: any) => {
+    try {
+      const lat = biz.latitude;
+      const lng = biz.longitude;
+      const label = biz.name || 'Destination';
+      const mapsUrl = `https://maps.google.com/maps?q=${label}&daddr=${lat},${lng}`;
+      await Share.share({
+        message: `Check out ${label} on Nexi! 📍 ${mapsUrl}`,
+        title: label,
+      });
+    } catch {}
+  }, []);
+
+  // ── Open external maps for navigation ─────────────────────────────────
+  const openExternalMaps = useCallback((biz: any) => {
+    const lat = biz.latitude;
+    const lng = biz.longitude;
+    const label = encodeURIComponent(biz.name || 'Destination');
+    
+    if (Platform.OS === 'ios') {
+      // Apple Maps
+      const url = `maps://app?daddr=${lat},${lng}&q=${label}`;
+      Linking.openURL(url).catch(() => {
+        // Fallback to Google Maps web
+        Linking.openURL(`https://maps.google.com/maps?daddr=${lat},${lng}&q=${label}`);
+      });
+    } else {
+      // Google Maps app (Android)
+      const url = `https://maps.google.com/maps?daddr=${lat},${lng}&q=${label}`;
+      Linking.openURL(url);
+    }
+  }, []);
+
+  // ── Emoji helper ────────────────────────────────────────────────────────
+  const getEmoji = (catId: string) => {
+    const map: Record<string, string> = {
+      food: '🍽️', cafe: '☕', hotel: '🏨', health: '🏥',
+      shop: '🛍️', club: '🎵', fuel: '⛽', finance: '🏦',
+      atm: '🏧', edu: '🏫', gym: '💪', salon: '💇',
+      electronics: '📱', sports: '🚲', realestate: '🏠',
+      carwash: '🚿', auto: '🚗', loan: '💰', tech: '💻',
+      church: '⛪', government: '🏛️', park: '🌳',
+      culture: '🎭', transport: '🚌',
+    };
+    return map[catId] || '📍';
+  };
+
+  // ── Marker Types ──────────────────────────────────────────────────────
+  // Different pin colors/types for different place categories:
+  // - Google-registered businesses (#EA4335 - Google Red)
+  // - Verified businesses (#34A853 - Google Green)
+  // - Saved places with heart overlay
+  // - Open Now places with subtle glow
+  // - User-added places (#FBBC04 - Google Yellow)
+
+  // ── Convert clustered markers to MapMarkerData for WebMapView ───────────
+  const markerData = useMemo((): MapMarkerData[] => {
+    return clusteredMarkers.map((item: any) => {
+      const isCluster = item.count && item.count > 1;
+      if (isCluster) {
+        return {
+          id: item.id,
+          latitude: item.latitude,
+          longitude: item.longitude,
+          emoji: '',
+          color: '#4285F4',
+          isSelected: selectedBusiness === item.id,
+          count: item.count,
+          markerType: 'cluster',
+        };
+      }
+      
+      // Determine marker type based on business properties (priority order)
+      let markerColor: string = '#EA4335'; // Default Google Red
+      let markerType: 'google_business' | 'verified' | '24hour' | 'popular' = 'google_business';
+      
+      // Priority: 24hr > Popular > Verified (most distinctive first)
+      if (item.hours?.includes('24')) {
+        markerColor = '#4285F4'; // Blue for 24-hour places
+        markerType = '24hour';
+      } else if (item.reviews > 200) {
+        markerColor = '#EA4335'; // Red for popular places
+        markerType = 'popular';
+      } else if (item.verified) {
+        markerColor = '#34A853'; // Google Green for verified
+        markerType = 'verified';
+      }
+      
+      return {
+        id: item.id,
+        latitude: item.latitude,
+        longitude: item.longitude,
+        emoji: getEmoji(item.categoryId),
+        color: markerColor,
+        isSelected: selectedBusiness === item.id,
+        isSaved: savedSet.has(item.id),
+        showSavedLayer: showSavedLayer,
+        markerType,
+      };
+    });
+  }, [clusteredMarkers, selectedBusiness, savedSet, showSavedLayer]);
 
   // ── Selected Business ───────────────────────────────────────────────────
   const selectedBiz = selectedBusiness
-    ? businesses.find((b) => b.id === selectedBusiness)
+    ? filteredBusinesses.find((b: any) => b.id === selectedBusiness)
     : null;
 
-  // ── Color helper ────────────────────────────────────────────────────────
-  const getCategoryColor = (categoryId: string) => {
-    const cat = CATEGORY_FILTERS.find((c) => c.id === categoryId);
-    return cat?.color || '#1F2937';
-  };
-
-  // ── Request Location Permission on Mount ───────────────────────────────
+  // ── Request Location Permission on Mount (INSTANT cache first) ────────
   useEffect(() => {
+    let isMounted = true;
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const loc = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced,
-          });
+        if (status !== 'granted') return;
+
+        // 1. Use LAST KNOWN location immediately (usually <50ms, cached by OS)
+        const cached = await Location.getLastKnownPositionAsync({
+          maxAge: 120000, // accept positions up to 2 minutes old
+        });
+        if (isMounted && cached) {
           setUserLocation({
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
+            latitude: cached.coords.latitude,
+            longitude: cached.coords.longitude,
           });
+          console.log('📍 Using cached location instantly');
+        }
+
+        // 2. Fetch a FRESH GPS fix in parallel (takes 1-5s but more accurate)
+        const fresh = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (isMounted) {
+          setUserLocation({
+            latitude: fresh.coords.latitude,
+            longitude: fresh.coords.longitude,
+          });
+          console.log('📍 Refined with fresh GPS fix');
         }
       } catch (e) {
         console.log('Location permission error:', e);
       }
     })();
+    return () => { isMounted = false; };
   }, []);
+
+  // ── Search via OpenStreetMap API when user types a query ─────────────
+  useEffect(() => {
+    let isMounted = true;
+    
+    // Auto-fetch nearby places on initial load if no search text is provided
+    if (!searchText.trim()) {
+      if (userLocation && !hasFetchedNearby) {
+        setHasFetchedNearby(true);
+        (async () => {
+          if (isMounted) setIsSearchingApi(true);
+          try {
+            const results = await searchPlaces(
+              "restaurant cafe hotel bank hospital clinic",
+              { lat: userLocation.latitude, lng: userLocation.longitude },
+              5000
+            );
+            if (isMounted) setApiResults(results);
+          } catch {
+            if (isMounted) setApiResults([]);
+          } finally {
+            if (isMounted) setIsSearchingApi(false);
+          }
+        })();
+      } else if (!hasFetchedNearby) {
+        setApiResults([]);
+      }
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      if (isMounted) setIsSearchingApi(true);
+      try {
+        const results = await searchPlaces(
+          searchText,
+          userLocation ? { lat: userLocation.latitude, lng: userLocation.longitude } : undefined,
+          10000,
+        );
+        if (isMounted) setApiResults(results);
+      } catch {
+        if (isMounted) setApiResults([]);
+      } finally {
+        if (isMounted) setIsSearchingApi(false);
+      }
+    }, 500);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [searchText, userLocation]);
 
   // ── Auto-center on user once both map is ready and location is known ──
   useEffect(() => {
@@ -325,8 +596,8 @@ export const MapScreenV2: React.FC = () => {
     }
   }, [mapReady, userLocation]);
 
-  // ── Region Change Handler ───────────────────────────────────────────────
-  const handleRegionChangeComplete = useCallback((region: Region) => {
+  // ── Region Change Handler ─────────────────────────────────────────────
+  const handleRegionChangeComplete = useCallback(async (region: Region) => {
     setCurrentRegion(region);
   }, []);
 
@@ -343,7 +614,7 @@ export const MapScreenV2: React.FC = () => {
         600,
       );
     } else {
-      // Fallback to Addis Ababa if no location available
+      // Fallback
       mapRef.current?.animateToRegion(
         {
           latitude: 9.02,
@@ -372,24 +643,34 @@ export const MapScreenV2: React.FC = () => {
     }
   }, [aiQuery, expandSheet]);
 
-  // ── Pin Press Handler ──────────────────────────────────────────────────
-  const handlePinPress = useCallback((biz: typeof businesses[0]) => {
-    setPinPreviewBiz(biz);
-    setSelectedBusiness(biz.id);
-    setShowNavMode(false);
-    // Auto-expand sheet to show preview
-    expandSheet('expanded');
-  }, [expandSheet]);
-
-  // ── Navigation Mode ────────────────────────────────────────────────────
-  const handleDirections = useCallback(() => {
-    setShowNavMode(true);
-    expandSheet('expanded');
-  }, [expandSheet]);
+  // ── WebMapView Marker Press Handler ────────────────────────────────────
+  const handleWebMarkerPress = useCallback((id: string) => {
+    const biz = filteredBusinesses.find((b: any) => b.id === id);
+    if (biz) {
+      if (biz.count) {
+        mapRef.current?.animateToRegion({
+          latitude: biz.latitude,
+          longitude: biz.longitude,
+          latitudeDelta: Math.max(0.005, currentRegion.latitudeDelta / 2),
+          longitudeDelta: Math.max(0.005, currentRegion.longitudeDelta / 2),
+        });
+      } else {
+        setPinPreviewBiz(biz);
+        setSelectedBusiness(id);
+        mapRef.current?.animateToRegion({
+          latitude: biz.latitude,
+          longitude: biz.longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        });
+        expandSheet('expanded');
+      }
+    }
+  }, [filteredBusinesses, expandSheet, currentRegion]);
 
   // ── Filter Reset ────────────────────────────────────────────────────────
   const resetFilters = useCallback(() => {
-    setFilterDistance(10);
+    setFilterDistance(50);
     setFilterOpenNow(false);
     setFilterVerified(false);
     setFilterRatingMin(0);
@@ -404,104 +685,7 @@ export const MapScreenV2: React.FC = () => {
     outputRange: [MAP_HEIGHT - SHEET_COLLAPSED - insets.bottom + COLLAPSED_EXTRA, MAP_HEIGHT - SHEET_EXPANDED, MAP_HEIGHT - SHEET_FULL],
   });
 
-  // ── Render Cluster Marker ───────────────────────────────────────────────
-  const renderMarker = (item: any) => {
-    if (item.count && item.count > 1) {
-      // Cluster marker
-      return (
-        <Marker
-          key={item.id}
-          coordinate={{ latitude: item.latitude, longitude: item.longitude }}
-          onPress={() => {
-            mapRef.current?.animateToRegion({
-              latitude: item.latitude,
-              longitude: item.longitude,
-              latitudeDelta: currentRegion?.latitudeDelta ? currentRegion.latitudeDelta * 0.4 : 0.02,
-              longitudeDelta: currentRegion?.longitudeDelta ? currentRegion.longitudeDelta * 0.4 : 0.02,
-            }, 400);
-          }}
-        >
-          <View style={[styles.clusterMarker, { backgroundColor: colors.primary + '22', borderColor: colors.primary }]}>
-            <View style={[styles.clusterInner, { backgroundColor: colors.primary }]}>
-              <Text style={styles.clusterText}>{item.count}</Text>
-            </View>
-          </View>
-        </Marker>
-      );
-    }
 
-    const biz = item;
-    const isSelected = selectedBusiness === biz.id;
-    const isSavedPin = savedSet.has(biz.id);
-    const categoryColor = getCategoryColor(biz.categoryId);
-    const pinSize = isSelected ? 40 : 30;
-
-    return (
-      <Marker
-        key={biz.id}
-        coordinate={{ latitude: biz.latitude, longitude: biz.longitude }}
-        onPress={() => handlePinPress(biz)}
-        tracksViewChanges={false}
-      >
-        <View style={styles.markerWrapper}>
-          {/* Saved heart indicator */}
-          {isSavedPin && showSavedLayer && (
-            <View style={styles.savedHeartBadge}>
-              <Ionicons name="heart" size={12} color="#EF4444" />
-            </View>
-          )}
-
-          {/* Pin shadow */}
-          <View
-            style={[
-              styles.pinShadow,
-              {
-                width: pinSize,
-                height: pinSize,
-                borderRadius: pinSize / 2,
-                backgroundColor: categoryColor,
-                opacity: 0.2,
-              },
-            ]}
-          />
-
-          {/* Pin body */}
-          <View
-            style={[
-              styles.pinBody,
-              {
-                width: pinSize,
-                height: pinSize,
-                borderRadius: pinSize / 2,
-                backgroundColor: categoryColor,
-                borderWidth: isSelected ? 3 : 2,
-                borderColor: isSelected ? '#FFF' : 'rgba(255,255,255,0.5)',
-              },
-            ]}
-          >
-            <Text style={styles.pinIcon}>
-              {biz.categoryId === 'food' ? '🍽️' :
-               biz.categoryId === 'cafe' ? '☕' :
-               biz.categoryId === 'hotel' ? '🏨' :
-               biz.categoryId === 'health' ? '🏥' :
-               biz.categoryId === 'shop' ? '🛍️' :
-               biz.categoryId === 'club' ? '🎵' :
-               biz.categoryId === 'fuel' ? '⛽' :
-               biz.categoryId === 'finance' ? '🏦' :
-               biz.categoryId === 'edu' ? '🏫' : '📍'}
-            </Text>
-          </View>
-
-          {/* Selected pulse ring */}
-          {isSelected && (
-            <View style={[styles.pulseRing, { borderColor: categoryColor }]} />
-          )}
-        </View>
-
-
-      </Marker>
-    );
-  };
 
   // ── Sheet Content ───────────────────────────────────────────────────────
   const renderSheetContent = () => {
@@ -529,92 +713,6 @@ export const MapScreenV2: React.FC = () => {
               <Ionicons name="chevron-up" size={18} color={colors.text} />
             </TouchableOpacity>
           </View>
-        </View>
-      );
-    }
-
-    // Navigation Mode
-    if (showNavMode && selectedBiz) {
-      return (
-        <View style={styles.navContainer}>
-          <View style={[styles.sheetHandle, { backgroundColor: colors.textMuted }]} />
-
-          {/* Nav Header */}
-          <View style={styles.navHeader}>
-            <Text style={[styles.navTitle, { color: colors.text }]}>🗺️ Navigation</Text>
-            <TouchableOpacity onPress={() => setShowNavMode(false)}>
-              <Text style={[styles.navCloseText, { color: colors.primary }]}>Done</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Travel Modes */}
-          <View style={styles.travelModeRow}>
-            {TRAVEL_MODES.map((mode) => (
-              <TouchableOpacity
-                key={mode.id}
-                onPress={() => setTravelMode(mode.id)}
-                style={[
-                  styles.travelModeBtn,
-                  {
-                    backgroundColor: travelMode === mode.id ? colors.primaryGlow : colors.cardElevated,
-                    borderColor: travelMode === mode.id ? colors.primary + '44' : colors.border,
-                  },
-                ]}
-              >
-                <Text style={styles.travelModeIcon}>{mode.icon}</Text>
-                <Text
-                  style={[
-                    styles.travelModeLabel,
-                    { color: travelMode === mode.id ? colors.primary : colors.textSub },
-                  ]}
-                >
-                  {mode.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* Route Info */}
-          <View style={[styles.routeCard, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
-            <View style={styles.routeInfoRow}>
-              <Ionicons name="location" size={16} color={colors.primary} />
-              <View style={styles.routeInfoText}>
-                <Text style={[styles.routeLabel, { color: colors.textMuted }]}>From</Text>
-                <Text style={[styles.routeValue, { color: colors.text }]}>Your Location</Text>
-              </View>
-            </View>
-            <View style={[styles.routeDivider, { backgroundColor: colors.border }]} />
-            <View style={styles.routeInfoRow}>
-              <Ionicons name="flag" size={16} color={colors.accent} />
-              <View style={styles.routeInfoText}>
-                <Text style={[styles.routeLabel, { color: colors.textMuted }]}>To</Text>
-                <Text style={[styles.routeValue, { color: colors.text }]}>{selectedBiz.name}</Text>
-              </View>
-            </View>
-            <View style={[styles.routeDivider, { backgroundColor: colors.border }]} />
-            <View style={styles.routeStats}>
-              <View style={styles.routeStat}>
-                <Ionicons name="time-outline" size={14} color={colors.primary} />
-                <Text style={[styles.routeStatValue, { color: colors.text }]}>
-                  {travelMode === 'driving' ? '12 min' : travelMode === 'walking' ? '35 min' : '18 min'}
-                </Text>
-                <Text style={[styles.routeStatLabel, { color: colors.textMuted }]}>ETA</Text>
-              </View>
-              <View style={styles.routeStat}>
-                <Ionicons name="resize" size={14} color={colors.accent} />
-                <Text style={[styles.routeStatValue, { color: colors.text }]}>
-                  {parseFloat(selectedBiz.distance) * (travelMode === 'walking' ? 1.5 : 1)} km
-                </Text>
-                <Text style={[styles.routeStatLabel, { color: colors.textMuted }]}>Distance</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Start Button */}
-          <TouchableOpacity style={[styles.startNavBtn, { backgroundColor: colors.primary }]}>
-            <Ionicons name="navigate" size={18} color="#FFF" />
-            <Text style={styles.startNavText}>Start Navigation</Text>
-          </TouchableOpacity>
         </View>
       );
     }
@@ -652,9 +750,7 @@ export const MapScreenV2: React.FC = () => {
                 />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => {
-                  /* Share */
-                }}
+                onPress={() => shareBusiness(biz)}
                 style={[styles.previewActionBtn, { backgroundColor: colors.cardElevated }]}
               >
                 <Ionicons name="share-outline" size={18} color={colors.textSub} />
@@ -711,15 +807,17 @@ export const MapScreenV2: React.FC = () => {
             {/* Quick Actions */}
             <View style={styles.previewActions}>
               <TouchableOpacity
-                onPress={handleDirections}
+                onPress={() => openExternalMaps(biz)}
                 style={[styles.previewAction, { backgroundColor: colors.primary }]}
               >
                 <Ionicons name="navigate" size={16} color="#FFF" />
-                <Text style={styles.previewActionText}>Directions</Text>
+                <Text style={styles.previewActionText}>Navigate</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => {
-                  /* Call */
+                  if (biz.phone) {
+                    Linking.openURL(`tel:${biz.phone}`);
+                  }
                 }}
                 style={[styles.previewAction, { backgroundColor: colors.accent }]}
               >
@@ -727,7 +825,26 @@ export const MapScreenV2: React.FC = () => {
                 <Text style={styles.previewActionText}>Call</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => router.push(`/business/${biz.id}`)}
+                onPress={() => {
+                      const d = encodeURIComponent(JSON.stringify({
+                        name: biz.name,
+                        category: biz.category,
+                        categoryId: biz.categoryId,
+                        phone: biz.phone,
+                        website: biz.website,
+                        rating: biz.rating,
+                        reviews: biz.reviews,
+                        distance: biz.distance,
+                        latitude: biz.latitude,
+                        longitude: biz.longitude,
+                        image: biz.image,
+                        verified: biz.verified,
+                        description: biz.description,
+                        hours: biz.hours,
+                        address: biz.address,
+                      }));
+                      router.push(`/business/${biz.id}?data=${d}`);
+                    }}
                 style={[styles.previewAction, { backgroundColor: colors.violet }]}
               >
                 <Ionicons name="information-circle" size={16} color="#FFF" />
@@ -766,73 +883,55 @@ export const MapScreenV2: React.FC = () => {
               <Ionicons name="options" size={16} color={colors.primary} />
             </TouchableOpacity>
           </View>
-
-          {/* Discovery Layer Badges */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.discoveryRow}
-          >
-            {DISCOVERY_BADGES.map((badge) => (
-              <TouchableOpacity
-                key={badge.id}
-                onPress={() => setActiveDiscovery(activeDiscovery === badge.id ? null : badge.id)}
-                style={[
-                  styles.discoveryChip,
-                  {
-                    backgroundColor: activeDiscovery === badge.id ? badge.color + '22' : colors.cardElevated,
-                    borderColor: activeDiscovery === badge.id ? badge.color : colors.border,
-                  },
-                ]}
-              >
-                <Text style={styles.discoveryIcon}>{badge.icon}</Text>
-                <Text
+          {/* Discovery + Saved Row — no gap */}
+          <View style={{ gap: 4 }}>
+            <View style={{ flexDirection: 'row', flexWrap: 'nowrap', gap: 6 }}>
+              {DISCOVERY_BADGES.map((badge) => (
+                <TouchableOpacity
+                  key={badge.id}
+                  onPress={() => setActiveDiscovery(activeDiscovery === badge.id ? null : badge.id)}
                   style={[
-                    styles.discoveryLabel,
-                    { color: activeDiscovery === badge.id ? badge.color : colors.textSub },
+                    styles.discoveryChip,
+                    {
+                      backgroundColor: activeDiscovery === badge.id ? badge.color + '22' : colors.cardElevated,
+                      borderColor: activeDiscovery === badge.id ? badge.color : colors.border,
+                    },
                   ]}
                 >
-                  {badge.label}
-                </Text>
-                {activeDiscovery === badge.id && (
-                  <TouchableOpacity onPress={() => setActiveDiscovery(null)}>
-                    <Ionicons name="close-circle" size={14} color={badge.color} />
-                  </TouchableOpacity>
-                )}
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+                  <Text style={styles.discoveryIcon}>{badge.icon}</Text>
+                  <Text style={[styles.discoveryLabel, { color: activeDiscovery === badge.id ? badge.color : colors.textSub }]}>
+                    {badge.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
-          {/* Saved Layer Toggle */}
-          <TouchableOpacity
-            onPress={() => setShowSavedLayer(!showSavedLayer)}
-            style={[
-              styles.savedLayerToggle,
-              {
-                backgroundColor: showSavedLayer ? colors.primaryGlow : colors.cardElevated,
-                borderColor: showSavedLayer ? colors.primary + '44' : colors.border,
-              },
-            ]}
-          >
-            <Ionicons
-              name={showSavedLayer ? 'heart' : 'heart-outline'}
-              size={16}
-              color={showSavedLayer ? colors.primary : colors.textMuted}
-            />
-            <Text
+            {/* Saved Layer Toggle */}
+            <TouchableOpacity
+              onPress={() => setShowSavedLayer(!showSavedLayer)}
               style={[
-                styles.savedLayerText,
-                { color: showSavedLayer ? colors.primary : colors.textSub },
+                styles.savedLayerToggle,
+                {
+                  backgroundColor: showSavedLayer ? colors.primaryGlow : colors.cardElevated,
+                  borderColor: showSavedLayer ? colors.primary + '44' : colors.border,
+                },
               ]}
             >
-              {showSavedLayer ? 'Showing Saved' : 'Show Saved Places'}
-            </Text>
-            {showSavedLayer && (
-              <Text style={[styles.savedLayerCount, { color: colors.primary }]}>
-                ({savedPlaces.length})
+              <Ionicons
+                name={showSavedLayer ? 'heart' : 'heart-outline'}
+                size={16}
+                color={showSavedLayer ? colors.primary : colors.textMuted}
+              />
+              <Text style={[styles.savedLayerText, { color: showSavedLayer ? colors.primary : colors.textSub }]}>
+                {showSavedLayer ? 'Showing Saved' : 'Show Saved Places'}
               </Text>
-            )}
-          </TouchableOpacity>
+              {showSavedLayer && (
+                <Text style={[styles.savedLayerCount, { color: colors.primary }]}>
+                  ({savedPlaces.length})
+                </Text>
+              )}
+            </TouchableOpacity>
+          </View>
 
           {/* Offline Indicator */}
           {isOffline && (
@@ -858,13 +957,13 @@ export const MapScreenV2: React.FC = () => {
                     onPress={() => {
                       setPinPreviewBiz(biz);
                       setSelectedBusiness(biz.id);
-                      // Animate to business on map
                       mapRef.current?.animateToRegion({
                         latitude: biz.latitude,
                         longitude: biz.longitude,
-                        latitudeDelta: 0.02,
-                        longitudeDelta: 0.02,
-                      }, 500);
+                        latitudeDelta: 0.01,
+                        longitudeDelta: 0.01,
+                      });
+                      expandSheet('expanded');
                     }}
                     style={[styles.resultItem, { borderBottomColor: colors.border }]}
                     activeOpacity={0.7}
@@ -906,7 +1005,7 @@ export const MapScreenV2: React.FC = () => {
                       </View>
                     </View>
                     <TouchableOpacity
-                      onPress={() => toggleSavedPlace(biz.id)}
+                      onPress={() => { toggleSavedPlace(biz.id); router.push('/saved'); }}
                       style={styles.resultSaveBtn}
                     >
                       <Ionicons
@@ -1024,7 +1123,7 @@ export const MapScreenV2: React.FC = () => {
                     {
                       backgroundColor: filterDistance === d ? colors.primary : colors.cardElevated,
                       borderColor: filterDistance === d ? colors.primary : colors.border,
-                      width: filterDistance === d ? 44 : 36,
+                      borderWidth: filterDistance === d ? 2 : 1,
                     },
                   ]}
                 >
@@ -1194,7 +1293,7 @@ export const MapScreenV2: React.FC = () => {
           FULL SCREEN MAP
          ════════════════════════════════════════════════════════════════ */}
       <View style={styles.mapContainer}>
-        <MapView
+        <WebMapView
           ref={mapRef}
           style={StyleSheet.absoluteFill}
           initialRegion={{
@@ -1205,20 +1304,13 @@ export const MapScreenV2: React.FC = () => {
           }}
           onRegionChangeComplete={handleRegionChangeComplete}
           onMapReady={() => setMapReady(true)}
+          onMarkerPress={handleWebMarkerPress}
+          onUserLocation={(loc) => setUserLocation(loc)}
+          userLocation={userLocation}
           showsUserLocation={true}
-          showsMyLocationButton={false}
           followsUserLocation={true}
-          showsCompass={false}
-          mapType={isDark ? 'standard' : 'standard'}
-          customMapStyle={isDark ? darkMapStyle : undefined}
-          rotateEnabled={true}
-          zoomEnabled={true}
-          scrollEnabled={true}
-          toolbarEnabled={false}
-        >
-          {/* Business Markers (saved places show heart badges via renderMarker) */}
-          {clusteredMarkers.map((item) => renderMarker(item))}
-        </MapView>
+          markers={markerData}
+        />
 
         {/* ═══ Floating Search Bar (Top Center) ═══ */}
         <View
@@ -1228,16 +1320,16 @@ export const MapScreenV2: React.FC = () => {
           ]}
           pointerEvents="box-none"
         >
-          <View style={[styles.glassSearchBar, { backgroundColor: colors.glassBg, borderColor: colors.glassBorder }]}>
+          <View style={[styles.glassSearchBar, { backgroundColor: '#000000', borderColor: '#000000' }]}>
             {/* Search Icon */}
-            <Ionicons name="search" size={18} color={colors.textSub} />
+            <Ionicons name="search" size={18} color="#FFFFFF" />
 
             {/* Input */}
             <TextInput
               ref={searchInputRef}
-              style={[styles.searchInput, { color: colors.text }]}
+              style={[styles.searchInput, { color: '#FFFFFF' }]}
               placeholder="Search places, restaurants, hotels..."
-              placeholderTextColor={colors.textMuted}
+              placeholderTextColor="#999999"
               value={searchText}
               onChangeText={(text) => {
                 setSearchText(text);
@@ -1251,9 +1343,15 @@ export const MapScreenV2: React.FC = () => {
 
             {/* Right buttons */}
             <View style={styles.searchRightActions}>
-              {/* Voice Search */}
-              <TouchableOpacity style={styles.searchIconBtn}>
-                <Ionicons name="mic-outline" size={18} color={colors.textMuted} />
+              {/* Voice Search - Focuses search input */}
+              <TouchableOpacity
+                onPress={() => {
+                  searchInputRef.current?.focus();
+                  Vibration.vibrate(10);
+                }}
+                style={styles.searchIconBtn}
+              >
+                <Ionicons name="mic-outline" size={18} color="#FFFFFF" />
               </TouchableOpacity>
 
               {/* AI Button */}
@@ -1292,7 +1390,7 @@ export const MapScreenV2: React.FC = () => {
                   }}
                   style={styles.clearSearchBtn}
                 >
-                  <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                  <Ionicons name="close-circle" size={18} color="#FFFFFF" />
                 </TouchableOpacity>
               )}
             </View>
@@ -1319,8 +1417,8 @@ export const MapScreenV2: React.FC = () => {
                     style={[
                       styles.categoryChip,
                       {
-                        backgroundColor: isActive ? cat.color : colors.glassBg,
-                        borderColor: isActive ? cat.color : colors.glassBorder,
+                        backgroundColor: isActive ? cat.color : '#000000',
+                        borderColor: isActive ? cat.color : '#000000',
                       },
                     ]}
                     activeOpacity={0.7}
@@ -1329,7 +1427,7 @@ export const MapScreenV2: React.FC = () => {
                     <Text
                       style={[
                         styles.chipLabel,
-                        { color: isActive ? '#FFF' : colors.textSub },
+                        { color: isActive ? '#FFF' : '#FFFFFF' },
                       ]}
                     >
                       {cat.label}
@@ -1341,8 +1439,48 @@ export const MapScreenV2: React.FC = () => {
           </View>
         </View>
 
-        {/* ═══ Current Location Button (Bottom Right) ═══ */}
+        {/* ═══ Zoom Controls (Left Side) ═══ */}
+        <View style={styles.zoomControlsContainer} pointerEvents="box-none">
+          <TouchableOpacity
+            onPress={() => mapRef.current?.zoomIn()}
+            style={[styles.zoomBtn, { backgroundColor: colors.card, borderColor: colors.glassBorder }]}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="add" size={22} color={colors.text} />
+          </TouchableOpacity>
+          <View style={[styles.zoomDivider, { backgroundColor: colors.border }]} />
+          <TouchableOpacity
+            onPress={() => mapRef.current?.zoomOut()}
+            style={[styles.zoomBtn, { backgroundColor: colors.card, borderColor: colors.glassBorder }]}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="remove" size={22} color={colors.text} />
+          </TouchableOpacity>
+        </View>
+
+        {/* ═══ Current Location & Compass (Bottom Right) ═══ */}
         <View style={styles.locationBtnContainer} pointerEvents="box-none">
+          {/* Compass Button */}
+          <TouchableOpacity
+            onPress={() => mapRef.current?.resetBearing()}
+            style={[styles.locationBtn, { backgroundColor: colors.card, borderColor: colors.glassBorder }]}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="compass" size={20} color={colors.textSub} />
+          </TouchableOpacity>
+          {/* Traffic Toggle */}
+          <TouchableOpacity
+            onPress={() => {
+              const newVal = !showTraffic;
+              setShowTraffic(newVal);
+              mapRef.current?.setTraffic(newVal);
+            }}
+            style={[styles.locationBtn, { backgroundColor: showTraffic ? colors.accentGlow : colors.card, borderColor: colors.glassBorder }]}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="car" size={20} color={showTraffic ? colors.accent : colors.textSub} />
+          </TouchableOpacity>
+          {/* Location */}
           <TouchableOpacity
             onPress={centerOnUser}
             style={[styles.locationBtn, { backgroundColor: colors.card, borderColor: colors.glassBorder }]}
@@ -1350,27 +1488,51 @@ export const MapScreenV2: React.FC = () => {
           >
             <Ionicons name="locate" size={22} color={colors.primary} />
           </TouchableOpacity>
+          {/* Layers */}
           <TouchableOpacity
-            onPress={() => {
-              /* Layer toggle */
-            }}
-            style={[styles.locationBtn, { backgroundColor: colors.card, borderColor: colors.glassBorder }]}
+            onPress={() => setShowLayerPanel(!showLayerPanel)}
+            style={[styles.locationBtn, { backgroundColor: showLayerPanel ? colors.primaryGlow : colors.card, borderColor: colors.glassBorder }]}
             activeOpacity={0.8}
           >
-            <Ionicons name="layers-outline" size={20} color={colors.textSub} />
+            <Ionicons name="layers-outline" size={20} color={showLayerPanel ? colors.primary : colors.textSub} />
           </TouchableOpacity>
         </View>
 
-        {/* ═══ AI Discovery FAB (Floating) ═══ */}
-        <TouchableOpacity
-          onPress={handleAiSearch}
-          style={[styles.aiFab, { backgroundColor: colors.violet }]}
-          activeOpacity={0.85}
-        >
-          <Ionicons name="sparkles" size={22} color="#FFF" />
-        </TouchableOpacity>
 
 
+
+        {/* ═══ Layer Panel (floating) ═══ */}
+        {showLayerPanel && (
+          <View style={[styles.layerPanel, { backgroundColor: colors.card, borderColor: colors.glassBorder }]} pointerEvents="box-none">
+            <Text style={[styles.layerPanelTitle, { color: colors.text }]}>Map Style</Text>
+            {MAP_LAYERS.map((layer) => (
+              <TouchableOpacity
+                key={layer.id}
+                onPress={() => {
+                  setCurrentLayer(layer.id);
+                  mapRef.current?.setMapLayer(layer.id);
+                  setShowLayerPanel(false);
+                }}
+                style={[
+                  styles.layerOption,
+                  {
+                    backgroundColor: currentLayer === layer.id ? colors.primaryGlow : colors.surfaceAlt,
+                    borderColor: currentLayer === layer.id ? colors.primary + '44' : 'transparent',
+                  },
+                ]}
+              >
+                <Text style={styles.layerOptionIcon}>{layer.icon}</Text>
+                <View style={styles.layerOptionInfo}>
+                  <Text style={[styles.layerOptionLabel, { color: colors.text }]}>{layer.label}</Text>
+                  <Text style={[styles.layerOptionDesc, { color: colors.textMuted }]}>{layer.desc}</Text>
+                </View>
+                {currentLayer === layer.id && (
+                  <Ionicons name="checkmark-circle" size={18} color={colors.primary} />
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
 
         {/* ═══ Offline Indicator (if offline) ═══ */}
         {isOffline && (
@@ -1432,28 +1594,6 @@ export const MapScreenV2: React.FC = () => {
   );
 };
 
-// ── Dark Mode Map Style ───────────────────────────────────────────────────
-const darkMapStyle = [
-  { elementType: 'geometry', stylers: [{ color: '#242f3e' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#746855' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#242f3e' }] },
-  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#757575' }] },
-  { featureType: 'administrative.locality', elementType: 'labels.text.fill', stylers: [{ color: '#d59563' }] },
-  { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#d59563' }] },
-  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: '#263c3f' }] },
-  { featureType: 'poi.park', elementType: 'labels.text.fill', stylers: [{ color: '#6b9a76' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#38414e' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#212a37' }] },
-  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#9ca5b3' }] },
-  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#746855' }] },
-  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#1f2835' }] },
-  { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#f3d19c' }] },
-  { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#2f3948' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#17263c' }] },
-  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#515c6d' }] },
-  { featureType: 'water', elementType: 'labels.text.stroke', stylers: [{ color: '#17263c' }] },
-];
-
 // ── Styles ────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1 },
@@ -1481,8 +1621,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.12,
     shadowRadius: 8,
     elevation: 5,
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
-  searchInput: { flex: 1, fontSize: 15, fontWeight: '500', paddingVertical: 0 },
+  searchInput: { flex: 1, fontSize: 15, fontWeight: '500', paddingVertical: 0, color: '#FFFFFF' },
   searchRightActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   searchIconBtn: { padding: 4 },
   aiSearchBtn: {
@@ -1511,28 +1653,49 @@ const styles = StyleSheet.create({
   clearSearchBtn: { padding: 4 },
 
   // ── Category Chips ────────────────────────────────────────────────────
-  chipsContainer: { marginTop: SPACING.sm, height: 40 },
+  chipsContainer: { marginTop: SPACING.sm, height: 34 },
   chipsScroll: { gap: SPACING.sm, paddingHorizontal: SPACING.sm },
   categoryChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: RADIUS.full,
     borderWidth: 1,
-    elevation: 2,
+    elevation: 1,
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
-  chipIcon: { fontSize: 13 },
-  chipLabel: { fontSize: 12, fontWeight: '700' },
+  chipIcon: { fontSize: 11 },
+  chipLabel: { fontSize: 11, fontWeight: '700' },
 
-  // ── Location Button ───────────────────────────────────────────────────
+  // ── Zoom Controls (Left Side) ────────────────────────────────────────
+  zoomControlsContainer: {
+    position: 'absolute',
+    left: SPACING.md,
+    bottom: 200,
+    zIndex: 25,
+    borderRadius: RADIUS.lg,
+    overflow: 'hidden',
+    elevation: 4,
+  },
+  zoomBtn: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  zoomDivider: { height: 1 },
+
+  // ── Location / Actions (Bottom Right) ───────────────────────────────
   locationBtnContainer: {
     position: 'absolute',
     right: SPACING.md,
     bottom: 160,
     zIndex: 25,
-    gap: SPACING.md,
+    gap: SPACING.sm,
   },
   locationBtn: {
     width: 44,
@@ -1547,8 +1710,8 @@ const styles = StyleSheet.create({
   // ── AI FAB ────────────────────────────────────────────────────────────
   aiFab: {
     position: 'absolute',
-    left: SPACING.md,
-    bottom: 160,
+    right: SPACING.md,
+    bottom: 360,
     width: 48,
     height: 48,
     borderRadius: 24,
@@ -1590,30 +1753,7 @@ const styles = StyleSheet.create({
   placeCountText: { fontSize: 13, fontWeight: '700' },
 
   // ── Markers ───────────────────────────────────────────────────────────
-  markerWrapper: { alignItems: 'center', justifyContent: 'center', position: 'relative' },
-  pinShadow: { position: 'absolute', transform: [{ scale: 0.9 }] },
-  pinBody: { alignItems: 'center', justifyContent: 'center', elevation: 4 },
-  pinIcon: { fontSize: 13, fontWeight: 'bold' },
-  pulseRing: { position: 'absolute', width: 52, height: 52, borderRadius: 26, borderWidth: 2, opacity: 0.3 },
-  savedHeartBadge: { position: 'absolute', top: -6, right: -6, zIndex: 10 },
-
-  // ── Cluster Marker ────────────────────────────────────────────────────
-  clusterMarker: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-  },
-  clusterInner: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  clusterText: { color: '#FFF', fontSize: 14, fontWeight: '900' },
+  // (Markers are rendered inside the WebMapView using Leaflet/OSM)
 
   // ── Bottom Sheet ──────────────────────────────────────────────────────
   bottomSheet: {
@@ -1714,36 +1854,40 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: SPACING.md,
+    marginBottom: 6,
   },
   listHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
   listTitle: { fontSize: 18, fontWeight: '800' },
   filterToggleBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
 
   // Discovery
-  discoveryRow: { gap: SPACING.sm, marginBottom: SPACING.md },
+  discoveryRow: { gap: SPACING.sm, marginBottom: 0 },
   discoveryChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    justifyContent: 'center',
+    height: 24,
+    gap: 4,
+    paddingHorizontal: 10,
     borderRadius: RADIUS.full,
     borderWidth: 1,
+    elevation: 1,
   },
-  discoveryIcon: { fontSize: 13 },
+  discoveryIcon: { fontSize: 11 },
   discoveryLabel: { fontSize: 11, fontWeight: '700' },
 
   // Saved Layer Toggle
   savedLayerToggle: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: 8,
-    borderRadius: RADIUS.lg,
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
     borderWidth: 1,
-    marginBottom: SPACING.sm,
+    marginTop: 0,
+    marginBottom: 4,
+    alignSelf: 'flex-start',
   },
   savedLayerText: { fontSize: 12, fontWeight: '600' },
   savedLayerCount: { fontSize: 11, fontWeight: '700' },
@@ -1818,46 +1962,48 @@ const styles = StyleSheet.create({
   sortBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: RADIUS.lg,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: RADIUS.full,
     borderWidth: 1,
   },
-  sortIcon: { fontSize: 13 },
-  sortLabel: { fontSize: 12, fontWeight: '600' },
+  sortIcon: { fontSize: 11 },
+  sortLabel: { fontSize: 11, fontWeight: '600' },
   sliderRow: { flexDirection: 'row', gap: SPACING.sm, flexWrap: 'wrap' },
   sliderDot: {
-    height: 34,
+    height: 28,
+    minWidth: 36,
     borderRadius: RADIUS.full,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
+    paddingHorizontal: 8,
   },
-  sliderLabel: { fontWeight: '700' },
+  sliderLabel: { fontWeight: '700', fontSize: 11 },
   toggleRow: { gap: SPACING.sm },
   toggleBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: RADIUS.lg,
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: RADIUS.full,
     borderWidth: 1,
   },
-  toggleCheck: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 2 },
-  toggleLabel: { fontSize: 13, fontWeight: '600' },
+  toggleCheck: { width: 16, height: 16, borderRadius: 8, alignItems: 'center', justifyContent: 'center', borderWidth: 2 },
+  toggleLabel: { fontSize: 11, fontWeight: '600' },
   ratingRow: { flexDirection: 'row', gap: SPACING.sm },
   ratingBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: RADIUS.lg,
+    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: RADIUS.full,
     borderWidth: 1,
   },
-  ratingBtnText: { fontSize: 12, fontWeight: '700' },
+  ratingBtnText: { fontSize: 11, fontWeight: '700' },
   applyBtn: {
     paddingVertical: SPACING.md,
     borderRadius: RADIUS.lg,
@@ -1866,47 +2012,35 @@ const styles = StyleSheet.create({
   },
   applyBtnText: { color: '#FFF', fontSize: 15, fontWeight: '800' },
 
-  // ── Navigation ────────────────────────────────────────────────────────
-  navContainer: { flex: 1, paddingHorizontal: SPACING.lg },
-  navHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.md },
-  navTitle: { fontSize: 18, fontWeight: '800' },
-  navCloseText: { fontSize: 14, fontWeight: '700' },
-  travelModeRow: { flexDirection: 'row', gap: SPACING.sm, marginBottom: SPACING.lg },
-  travelModeBtn: {
-    flex: 1,
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: RADIUS.lg,
-    borderWidth: 1,
-  },
-  travelModeIcon: { fontSize: 20 },
-  travelModeLabel: { fontSize: 11, fontWeight: '600' },
-  routeCard: {
+  // ── Layer Panel ───────────────────────────────────────────────────────
+  layerPanel: {
+    position: 'absolute',
+    left: SPACING.md,
+    right: SPACING.md,
+    top: 160,
+    zIndex: 35,
     borderRadius: RADIUS.lg,
     borderWidth: 1,
     padding: SPACING.lg,
     gap: SPACING.sm,
-    marginBottom: SPACING.lg,
+    elevation: 8,
+    maxWidth: 280,
+    alignSelf: 'center',
   },
-  routeInfoRow: { flexDirection: 'row', gap: SPACING.md },
-  routeInfoText: { flex: 1 },
-  routeLabel: { fontSize: 10, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
-  routeValue: { fontSize: 13, fontWeight: '700' },
-  routeDivider: { height: 1, marginVertical: 4 },
-  routeStats: { flexDirection: 'row', gap: SPACING.lg, marginTop: SPACING.sm },
-  routeStat: { flexDirection: 'row', alignItems: 'center', gap: 3 },
-  routeStatValue: { fontSize: 13, fontWeight: '800' },
-  routeStatLabel: { fontSize: 10, fontWeight: '600' },
-  startNavBtn: {
+  layerPanelTitle: { fontSize: 16, fontWeight: '800', marginBottom: SPACING.sm },
+  layerOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.md,
+    gap: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm + 2,
     borderRadius: RADIUS.lg,
+    borderWidth: 1,
   },
-  startNavText: { color: '#FFF', fontSize: 15, fontWeight: '800' },
+  layerOptionIcon: { fontSize: 18 },
+  layerOptionInfo: { flex: 1 },
+  layerOptionLabel: { fontSize: 13, fontWeight: '700' },
+  layerOptionDesc: { fontSize: 11, fontWeight: '500' },
 
   // ── AI Search Overlay ─────────────────────────────────────────────────
   aiOverlay: {
