@@ -21,8 +21,9 @@ import { useTheme, SPACING, RADIUS, TYPOGRAPHY } from '../theme/colors';
 import WebMapView from '../components/WebMapView';
 import type { MapMarkerData, Region } from '../components/WebMapView';
 import * as Location from 'expo-location';
-import { haversineKm, formatDistance } from '../services/dataService';
-
+import { haversineKm, formatDistance, fetchPromotedBusinesses, fetchTrendingBusinessIds, fetchReviewsForBusiness } from '../services/dataService';
+import { getRecommendedForUser, getRankedWithExplanations } from '../services/recommendationService';
+import { fetchTrendingSearches } from '../services/searchService';
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = width * 0.72;
 const PHOTO_SIZE = (width - SPACING.xl * 2 - SPACING.md * 3) / 4;
@@ -41,11 +42,7 @@ const HOME_CATEGORIES = [
 ];
 
 // ── Featured / Sponsored Businesses ───────────────────────────────────────
-const FEATURED = [
-  { id: 'f1', name: 'Sheraton Addis Hotel', desc: 'Luxury stay • Pool & Spa', image: 'https://images.unsplash.com/photo-1551882547-ff40c63fe5fa?w=400', rating: 4.8, label: 'Sponsored' },
-  { id: 'f2', name: 'Yod Abyssinia Restaurant', desc: 'Traditional cuisine • Live music', image: 'https://images.unsplash.com/photo-1517521271057-7b1570fcff78?w=400', rating: 4.8, label: 'Popular' },
-  { id: 'f3', name: 'Hyatt Regency', desc: '5-star • City views', image: 'https://images.unsplash.com/photo-1542314831-068cd1dbfeeb?w=400', rating: 4.7, label: 'Sponsored' },
-];
+// Now fetched dynamically from business_promotions
 
 // ── Category emoji helper ───────────────────────────────────────────────
 const getCatEmoji = (category: string): string => {
@@ -69,6 +66,14 @@ export const HomeScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const miniMapRef = useRef<any>(null);
+
+  // ── Dynamic Data State ──────────────────────────────────────────────────
+  const [promoted, setPromoted] = useState<any[]>([]);
+  const [trending, setTrending] = useState<any[]>([]);
+  const [recommended, setRecommended] = useState<any[]>([]);
+  const [recommendedExplanations, setRecommendedExplanations] = useState<Record<string, any>>({});
+  const [contextInfo, setContextInfo] = useState<string>('');
+  const [trendingSearches, setTrendingSearches] = useState<string[]>(['Best coffee in Bole', 'Hotels near airport', 'Open pharmacy', 'Traditional food']);
 
   // ── Computed Data ──────────────────────────────────────────────────────
   const nearbyPlaces = useMemo(() => {
@@ -95,9 +100,60 @@ export const HomeScreen: React.FC = () => {
       .slice(0, 8);
   }, [businesses, userLocation]);
 
-  const trendingPlaces = useMemo(() =>
-    [...businesses].sort((a, b) => b.reviews - a.reviews).slice(0, 8),
-  [businesses]);
+  // ── Dynamic Fetching ────────────────────────────────────────────────────
+  useEffect(() => {
+    async function loadDynamicContent() {
+      if (!user?.id) return;
+      
+      const [promoData, trendIds, searchSuggestions] = await Promise.all([
+        fetchPromotedBusinesses(),
+        fetchTrendingBusinessIds(8),
+        fetchTrendingSearches(5)
+      ]);
+      
+      setPromoted(promoData);
+      
+      if (searchSuggestions.length > 0) {
+        setTrendingSearches(searchSuggestions);
+      }
+
+      if (trendIds.length > 0) {
+        const trendBiz = trendIds.map(id => businesses.find(b => b.id === id)).filter(Boolean);
+        setTrending(trendBiz);
+      } else {
+        // fallback
+        setTrending([...businesses].sort((a, b) => b.reviews - a.reviews).slice(0, 8));
+      }
+    }
+    loadDynamicContent();
+  }, [user?.id, businesses]);
+
+  // Load AI-ranked recommendations with explanations once we have location
+  useEffect(() => {
+    async function loadRecommendations() {
+      if (!user?.id) return;
+      const { businesses: recs, explanations } = await getRankedWithExplanations(
+        user.id,
+        userLocation?.latitude,
+        userLocation?.longitude,
+        useAppStore.getState().selectedCity
+      );
+      if (recs.length > 0) {
+        setRecommended(recs.slice(0, 5));
+        setRecommendedExplanations(explanations);
+        // Show smart context info
+        const firstExp = Object.values(explanations)[0] as any;
+        if (firstExp) {
+          const parts: string[] = [];
+          if (firstExp.timeInfo) parts.push(firstExp.timeInfo);
+          if (firstExp.isWeekend) parts.push('weekend');
+          if (firstExp.isNewUser) parts.push('new user');
+          setContextInfo(parts.join(' · '));
+        }
+      }
+    }
+    loadRecommendations();
+  }, [user?.id, userLocation]);
 
   const latestReviews = useMemo(() =>
     [...MOCK_REVIEWS_DATA].sort((a, b) => {
@@ -259,9 +315,9 @@ export const HomeScreen: React.FC = () => {
             </View>
           </TouchableOpacity>
 
-          {/* Example search suggestions */}
+          {/* Dynamic search suggestions */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.examplesRow}>
-            {['Best coffee in Bole', 'Hotels near airport', 'Open pharmacy', 'Traditional food'].map((ex, i) => (
+            {trendingSearches.map((ex, i) => (
               <TouchableOpacity
                 key={i}
                 onPress={() => { setSearchQuery(ex); router.push('/search'); }}
@@ -407,7 +463,7 @@ export const HomeScreen: React.FC = () => {
             </View>
           </View>
 
-          {trendingPlaces.slice(0, 4).map((biz) => (
+          {trending.slice(0, 4).map((biz) => (
             <TouchableOpacity
               key={biz.id}
               onPress={() => router.push(`/business/${biz.id}`)}
@@ -442,15 +498,15 @@ export const HomeScreen: React.FC = () => {
         </View>
 
         {/* ════════════════════════════════════════════════════════════════
-            SECTION 7: RECOMMENDED FOR YOU (AI placeholder)
+            SECTION 7: RECOMMENDED FOR YOU (AI-powered)
            ════════════════════════════════════════════════════════════════ */}
         <View style={[styles.recommendCard, { backgroundColor: colors.violetGlow, borderColor: colors.violet + '33' }]}>
           <View style={styles.recommendLeft}>
             <Text style={styles.recommendIcon}>✨</Text>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.recommendTitle, { color: colors.text }]}>Recommended For You</Text>
+              <Text style={[styles.recommendTitle, { color: colors.text }]}>AI Recommended For You</Text>
               <Text style={[styles.recommendSub, { color: colors.textSub }]}>
-                AI-powered picks based on your taste
+                {contextInfo ? `Smart picks · ${contextInfo}` : 'Based on your preferences'}
               </Text>
             </View>
           </View>
@@ -462,6 +518,84 @@ export const HomeScreen: React.FC = () => {
             <Text style={styles.recommendBtnText}>Explore</Text>
           </TouchableOpacity>
         </View>
+
+        {/* AI-ranked recommendation cards with 'Why this place?' explanations */}
+        {recommended.length > 0 && (
+          <View style={styles.section}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.horizScroll}
+              decelerationRate="fast"
+              snapToInterval={CARD_WIDTH + SPACING.lg}
+            >
+              {recommended.map((biz) => {
+                const exp = recommendedExplanations[biz.id];
+                const reasons = exp?.reasons || [];
+                return (
+                  <TouchableOpacity
+                    key={biz.id}
+                    onPress={() => router.push(`/business/${biz.id}`)}
+                    style={[styles.horizCard, { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.violet + '44' }]}
+                    activeOpacity={0.85}
+                  >
+                    <Image source={{ uri: biz.image }} style={styles.horizCardImg} resizeMode="cover" />
+                    {/* Rank badge */}
+                    {biz.rank && (
+                      <View style={[styles.rankBadge, { backgroundColor: colors.violet }]}>
+                        <Text style={styles.rankBadgeText}>#{biz.rank}</Text>
+                      </View>
+                    )}
+                    <View style={styles.horizCardInfo}>
+                      <View style={styles.horizCardTop}>
+                        <Text style={[styles.horizCardName, { color: colors.text }]} numberOfLines={1}>
+                          {biz.name}
+                        </Text>
+                        {biz.verified && <Ionicons name="checkmark-circle" size={14} color={colors.accent} />}
+                      </View>
+                      <View style={styles.horizCardMeta}>
+                        <Text style={[styles.horizCardCat, { color: colors.textMuted }]} numberOfLines={1}>
+                          {biz.category}
+                        </Text>
+                        {biz.distance ? (
+                          <>
+                            <Text style={[styles.horizCardDot, { color: colors.textMuted }]}> • </Text>
+                            <Ionicons name="location" size={11} color={colors.textMuted} />
+                            <Text style={[styles.horizCardDist, { color: colors.textMuted }]}>{biz.distance}</Text>
+                          </>
+                        ) : null}
+                      </View>
+                      <View style={styles.horizCardRating}>
+                        <Ionicons name="star" size={12} color={colors.gold} />
+                        <Text style={[styles.horizCardScore, { color: colors.text }]}>{biz.rating.toFixed(1)}</Text>
+                        <Text style={[styles.horizCardReviews, { color: colors.textMuted }]}>
+                          ({biz.reviews})
+                        </Text>
+                      </View>
+                      {/* 'Why this place?' explanation */}
+                      {reasons.length > 0 && (
+                        <View style={{ marginTop: 4, gap: 2 }}>
+                          {reasons.slice(0, 2).map((r: string, i: number) => (
+                            <View key={i} style={[styles.explanationChip, { backgroundColor: colors.violetGlow }]}>
+                              <Ionicons name="sparkles" size={9} color={colors.violet} />
+                              <Text style={[styles.explanationText, { color: colors.violet }]}>{r}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                      {/* AI Score bar */}
+                      {exp?.score && (
+                        <View style={styles.scoreBar}>
+                          <View style={[styles.scoreBarFill, { width: `${Math.round(exp.score * 100)}%`, backgroundColor: colors.violet }]} />
+                        </View>
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        )}
 
         {/* ════════════════════════════════════════════════════════════════
             SECTION 8: COMMUNITY PHOTOS
@@ -579,26 +713,37 @@ export const HomeScreen: React.FC = () => {
             decelerationRate="fast"
             snapToInterval={CARD_WIDTH + SPACING.lg}
           >
-            {FEATURED.map((item) => (
-              <TouchableOpacity
-                key={item.id}
-                style={[styles.featuredCard, { backgroundColor: colors.card, borderColor: colors.border }]}
-                activeOpacity={0.85}
-              >
-                <Image source={{ uri: item.image }} style={styles.featuredImg} resizeMode="cover" />
-                <View style={[styles.featuredLabel, { backgroundColor: colors.primary }]}>
-                  <Text style={styles.featuredLabelText}>{item.label}</Text>
-                </View>
-                <View style={styles.featuredInfo}>
-                  <View style={styles.featuredRating}>
-                    <Ionicons name="star" size={12} color={colors.gold} />
-                    <Text style={[styles.featuredScore, { color: colors.text }]}>{item.rating}</Text>
+            {promoted.length > 0 ? (
+              promoted.map((item) => (
+                <TouchableOpacity
+                  key={item.id}
+                  onPress={() => router.push(`/business/${item.id}`)}
+                  style={[styles.featuredCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+                  activeOpacity={0.85}
+                >
+                  <Image source={{ uri: item.image }} style={styles.featuredImg} resizeMode="cover" />
+                  <View style={[styles.featuredLabel, { backgroundColor: colors.primary }]}>
+                    <Text style={styles.featuredLabelText}>
+                      {item.promotionType === 'boosted' ? 'Sponsored' : 'Featured'}
+                    </Text>
                   </View>
-                  <Text style={[styles.featuredName, { color: colors.text }]} numberOfLines={1}>{item.name}</Text>
-                  <Text style={[styles.featuredDesc, { color: colors.textSub }]}>{item.desc}</Text>
-                </View>
-              </TouchableOpacity>
-            ))}
+                  <View style={styles.featuredInfo}>
+                    <View style={styles.featuredRating}>
+                      <Ionicons name="star" size={12} color={colors.gold} />
+                      <Text style={[styles.featuredScore, { color: colors.text }]}>{item.rating}</Text>
+                    </View>
+                    <Text style={[styles.featuredName, { color: colors.text }]} numberOfLines={1}>{item.name}</Text>
+                    <Text style={[styles.featuredDesc, { color: colors.textSub }]} numberOfLines={1}>{item.category} • {item.distance}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))
+            ) : (
+              <View style={{ padding: SPACING.lg, paddingLeft: 0 }}>
+                <Text style={{ color: colors.textMuted, fontSize: 13, fontStyle: 'italic' }}>
+                  No featured places at the moment.
+                </Text>
+              </View>
+            )}
           </ScrollView>
         </View>
 
@@ -744,7 +889,7 @@ const styles = StyleSheet.create({
   // ── AI Recommend ────────────────────────────────────────────────────
   recommendCard: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginHorizontal: SPACING.xl, marginBottom: SPACING.xxl,
+    marginHorizontal: SPACING.xl, marginBottom: SPACING.md,
     borderRadius: RADIUS.xl, padding: SPACING.lg, borderWidth: 1, gap: SPACING.md,
   },
   recommendLeft: { flexDirection: 'row', alignItems: 'center', gap: SPACING.md, flex: 1 },
@@ -756,6 +901,21 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.lg, paddingHorizontal: SPACING.lg, paddingVertical: SPACING.sm,
   },
   recommendBtnText: { fontSize: 13, fontWeight: '700', color: '#FFF' },
+  rankBadge: {
+    position: 'absolute', top: SPACING.sm, right: SPACING.sm,
+    borderRadius: RADIUS.sm, paddingHorizontal: SPACING.sm, paddingVertical: 2,
+  },
+  rankBadgeText: { fontSize: 10, fontWeight: '800', color: '#FFF' },
+  explanationChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1, alignSelf: 'flex-start',
+  },
+  explanationText: { fontSize: 9, fontWeight: '600' },
+  scoreBar: {
+    height: 3, borderRadius: 2, marginTop: 4,
+    backgroundColor: 'rgba(0,0,0,0.1)', overflow: 'hidden',
+  },
+  scoreBarFill: { height: '100%', borderRadius: 2 },
 
   // ── Photo Grid ──────────────────────────────────────────────────────
   photoGrid: {

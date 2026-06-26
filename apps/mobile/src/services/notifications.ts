@@ -1,217 +1,182 @@
-// ── Notification Service ────────────────────────────────────────────────────
-// Uses REST API + polling for real-time updates (no WebSocket dependency)
-// Works reliably across all network configurations
+// ═══════════════════════════════════════════════════════════════════════════
+// Notifications Service — Fallback Polling
+// Primary live push is now handled by RealtimeService.
+// This service only polls occasionally (every 30s) as a safety net.
+// ═══════════════════════════════════════════════════════════════════════════
 
-import { api } from './api';
-
-// ── Notification Types (mirrors backend) ───────────────────────────────────
-
-export enum NotificationCategory {
-  NEW_REVIEW = 'new_review',
-  NEW_LOCATION = 'new_location',
-  LOGIN_ALERT = 'login_alert',
-  AD_PROMOTION = 'ad_promotion',
-  REWARD_EARNED = 'reward_earned',
-  BUSINESS_RESPONSE = 'business_response',
-  VERIFICATION_APPROVED = 'verification_approved',
-  PHOTO_LIKED = 'photo_liked',
-  REFERRAL_BONUS = 'referral_bonus',
-  TRENDING_ALERT = 'trending_alert',
-  LEADERBOARD_UPDATE = 'leaderboard_update',
-  CHALLENGE_COMPLETE = 'challenge_complete',
-}
+import { fetchNotificationsFromSupabase, fetchUnreadCountFromSupabase } from './dataService';
 
 export interface Notification {
   id: string;
   userId: string;
-  category: NotificationCategory;
+  category: string;
   title: string;
   description: string;
   icon: string;
   color: string;
   link?: string;
   imageUrl?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   read: boolean;
   createdAt: string;
 }
 
-// ── Category Meta ──────────────────────────────────────────────────────────
+export type NotificationCategory =
+  | 'new_review' | 'new_location' | 'login_alert' | 'ad_promotion'
+  | 'reward_earned' | 'business_response' | 'verification_approved'
+  | 'photo_liked' | 'referral_bonus' | 'trending_alert'
+  | 'leaderboard_update' | 'challenge_complete';
 
-export const CATEGORY_META: Record<NotificationCategory, { icon: string; color: string; label: string }> = {
-  [NotificationCategory.NEW_REVIEW]:         { icon: '⭐', color: '#F59E0B', label: 'New Review' },
-  [NotificationCategory.NEW_LOCATION]:       { icon: '📍', color: '#3B82F6', label: 'New Place' },
-  [NotificationCategory.LOGIN_ALERT]:        { icon: '🔐', color: '#8B5CF6', label: 'Login Alert' },
-  [NotificationCategory.AD_PROMOTION]:       { icon: '🎯', color: '#EF4444', label: 'Promotion' },
-  [NotificationCategory.REWARD_EARNED]:      { icon: '🎁', color: '#10B981', label: 'Reward' },
-  [NotificationCategory.BUSINESS_RESPONSE]:  { icon: '💬', color: '#3B82F6', label: 'Response' },
-  [NotificationCategory.VERIFICATION_APPROVED]: { icon: '✅', color: '#8B5CF6', label: 'Verified' },
-  [NotificationCategory.PHOTO_LIKED]:        { icon: '📸', color: '#F59E0B', label: 'Photo Liked' },
-  [NotificationCategory.REFERRAL_BONUS]:     { icon: '👥', color: '#10B981', label: 'Referral' },
-  [NotificationCategory.TRENDING_ALERT]:     { icon: '🔥', color: '#EF4444', label: 'Trending' },
-  [NotificationCategory.LEADERBOARD_UPDATE]: { icon: '🏆', color: '#F59E0B', label: 'Leaderboard' },
-  [NotificationCategory.CHALLENGE_COMPLETE]: { icon: '🎯', color: '#10B981', label: 'Challenge' },
+export const CATEGORY_META: Record<string, { icon: string; color: string; label: string }> = {
+  new_review: { icon: '💬', color: '#3B82F6', label: 'New Review' },
+  new_location: { icon: '📍', color: '#10B981', label: 'New Location' },
+  login_alert: { icon: '🔐', color: '#F59E0B', label: 'Login Alert' },
+  ad_promotion: { icon: '📣', color: '#8B5CF6', label: 'Promotion' },
+  reward_earned: { icon: '🎁', color: '#F59E0B', label: 'Reward' },
+  business_response: { icon: '💼', color: '#6366F1', label: 'Business Response' },
+  verification_approved: { icon: '✅', color: '#10B981', label: 'Verified' },
+  photo_liked: { icon: '📸', color: '#EC4899', label: 'Photo Liked' },
+  referral_bonus: { icon: '👥', color: '#14B8A6', label: 'Referral Bonus' },
+  trending_alert: { icon: '🔥', color: '#EF4444', label: 'Trending' },
+  leaderboard_update: { icon: '🏆', color: '#F59E0B', label: 'Leaderboard' },
+  challenge_complete: { icon: '🎯', color: '#8B5CF6', label: 'Challenge Complete' },
 };
 
-// ── Event Handlers ─────────────────────────────────────────────────────────
+// ── Random notification generator (for dev/testing) ───────────────────────
+const RANDOM_TITLES = [
+  { title: 'New Review!', desc: 'Someone reviewed a place you saved', icon: '💬', color: '#3B82F6', cat: 'new_review' as NotificationCategory },
+  { title: 'Points Earned 🎉', desc: 'You earned 50 points for your review!', icon: '🎁', color: '#10B981', cat: 'reward_earned' as NotificationCategory },
+  { title: 'Trending Alert', desc: 'A place you liked is trending this week', icon: '🔥', color: '#EF4444', cat: 'trending_alert' as NotificationCategory },
+  { title: 'Leaderboard Update', desc: 'You moved up 3 spots this week!', icon: '🏆', color: '#F59E0B', cat: 'leaderboard_update' as NotificationCategory },
+  { title: 'New Place Added', desc: 'A new restaurant opened near you', icon: '📍', color: '#8B5CF6', cat: 'new_location' as NotificationCategory },
+];
 
-export type UnreadCountHandler = (count: number) => void;
-export type NotificationsListHandler = (notifications: Notification[]) => void;
+type NotificationsCallback = (notifications: Notification[]) => void;
+type UnreadCountCallback = (count: number) => void;
 
-// ── Notification Service ───────────────────────────────────────────────────
-
-export class NotificationService {
-  private userId: string | null = null;
+class NotificationService {
   private pollInterval: ReturnType<typeof setInterval> | null = null;
+  private currentUserId: string | null = null;
   private isConnected = false;
-  private lastFetchHash = '';
-  private consecutiveErrors = 0;
+  private listeners: NotificationsCallback[] = [];
+  private countListeners: UnreadCountCallback[] = [];
 
-  // Event callbacks
-  private onUnreadCount: UnreadCountHandler | null = null;
-  private onNotificationsList: NotificationsListHandler | null = null;
-  private onConnectionChange: ((connected: boolean) => void) | null = null;
+  // Poll every 30 seconds (reduced from 10s because Realtime handles instant push)
+  private readonly POLL_DELAY = 30000;
 
-  // ── Start polling (REST API-based "real-time" updates) ───────────────
-  connect(userId: string): void {
-    if (this.userId === userId && this.pollInterval) return;
+  // ── Connection ────────────────────────────────────────────────────────────
 
-    this.disconnect();
-    this.userId = userId;
+  connect(userId: string) {
+    if (this.isConnected && this.currentUserId === userId) return;
 
-    console.log(`[NotificationService] Starting REST polling for user ${userId}...`);
-
-    // Mark as connected immediately (REST always works if server is reachable)
+    this.disconnect(); // Clear any existing
+    this.currentUserId = userId;
     this.isConnected = true;
-    this.onConnectionChange?.(true);
 
-    // Initial fetch
-    this.fetchAll();
+    // Immediate initial fetch
+    this.fetchData();
 
-    // Poll every 10 seconds for new notifications
-    this.pollInterval = setInterval(() => this.fetchAll(), 10000);
+    // Start fallback polling
+    this.pollInterval = setInterval(() => {
+      this.fetchData();
+    }, this.POLL_DELAY);
+
+    console.log(`[NotificationService] Fallback polling started for user: ${userId}`);
   }
 
-  // ── Stop polling ────────────────────────────────────────────────────
-  disconnect(): void {
+  disconnect() {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
     this.isConnected = false;
-    this.userId = null;
+    this.currentUserId = null;
+    console.log('[NotificationService] Disconnected');
   }
 
-  // ── Fetch all notifications + unread count ──────────────────────────
-  private async fetchAll(): Promise<void> {
-    if (!this.userId) return;
+  // ── Fetching Data ────────────────────────────────────────────────────────
+
+  private async fetchData() {
+    if (!this.currentUserId) return;
 
     try {
-      const [notifications, unreadResult] = await Promise.all([
-        this.fetchNotifications(this.userId),
-        this.fetchUnreadCount(this.userId),
+      const [list, count] = await Promise.all([
+        fetchNotificationsFromSupabase(this.currentUserId),
+        fetchUnreadCountFromSupabase(this.currentUserId),
       ]);
 
-      // Reset error count on success
-      this.consecutiveErrors = 0;
-      if (!this.isConnected) {
-        this.isConnected = true;
-        this.onConnectionChange?.(true);
-      }
-
-      // Check if data changed to avoid unnecessary re-renders
-      const newHash = JSON.stringify(notifications);
-      if (notifications.length > 0 && newHash !== this.lastFetchHash) {
-        this.lastFetchHash = newHash;
-        this.onNotificationsList?.(notifications);
-      }
-
-      this.onUnreadCount?.(unreadResult);
-    } catch {
-      this.consecutiveErrors++;
-      // Mark as disconnected after 3 consecutive errors
-      if (this.consecutiveErrors >= 3 && this.isConnected) {
-        this.isConnected = false;
-        this.onConnectionChange?.(false);
-      }
-    }
-  }
-
-  // ── Event Subscriptions ──────────────────────────────────────────────
-  onUnreadCountChange(handler: UnreadCountHandler): () => void {
-    this.onUnreadCount = handler;
-    return () => { this.onUnreadCount = null; };
-  }
-
-  onNotificationsListReceived(handler: NotificationsListHandler): () => void {
-    this.onNotificationsList = handler;
-    return () => { this.onNotificationsList = null; };
-  }
-
-  onConnectionStatusChange(handler: (connected: boolean) => void): () => void {
-    this.onConnectionChange = handler;
-    return () => { this.onConnectionChange = null; };
-  }
-
-  // ── REST API Calls ─────────────────────────────────────────────────
-
-  async fetchNotifications(userId: string): Promise<Notification[]> {
-    try {
-      return await api.get<Notification[]>('/notifications', { userId });
+      this.notifyListeners(list);
+      this.notifyCountListeners(count);
     } catch (error) {
-      return [];
+      console.warn('[NotificationService] Fallback fetch failed:', error);
     }
   }
 
-  async fetchUnreadCount(userId: string): Promise<number> {
-    try {
-      const result = await api.get<{ count: number }>('/notifications/unread-count', { userId });
-      return result.count;
-    } catch {
-      return 0;
-    }
+  // ── Subscriptions ────────────────────────────────────────────────────────
+
+  onNotificationsListReceived(callback: NotificationsCallback): () => void {
+    this.listeners.push(callback);
+    return () => {
+      this.listeners = this.listeners.filter((cb) => cb !== callback);
+    };
   }
 
-  async markAsRead(notificationId: string, userId: string): Promise<void> {
-    try {
-      await api.patch(`/notifications/${notificationId}/read`, undefined, { userId });
-      // Re-fetch to get updated data
-      this.fetchAll();
-    } catch {}
+  onUnreadCountChange(callback: UnreadCountCallback): () => void {
+    this.countListeners.push(callback);
+    return () => {
+      this.countListeners = this.countListeners.filter((cb) => cb !== callback);
+    };
   }
 
-  async markAllAsRead(userId: string): Promise<void> {
-    try {
-      await api.patch('/notifications/mark-all-read', undefined, { userId });
-      this.fetchAll();
-    } catch {}
+  private notifyListeners(data: Notification[]) {
+    this.listeners.forEach((cb) => cb(data));
   }
 
-  async simulateNotification(userId: string, type?: NotificationCategory): Promise<Notification | null> {
-    try {
-      const result = await api.post<Notification>('/notifications/simulate', { type, userId });
-      // Re-fetch to get the new notification
-      this.fetchAll();
-      return result;
-    } catch {
-      return null;
-    }
+  private notifyCountListeners(count: number) {
+    this.countListeners.forEach((cb) => cb(count));
   }
 
-  // ── Force a refresh ─────────────────────────────────────────────────
-  refresh(): void {
-    this.fetchAll();
-  }
+  // ── Additional methods used by useNotifications hook ─────────────────
 
-  // ── Connection status ────────────────────────────────────────────────
   get connected(): boolean {
     return this.isConnected;
   }
 
-  get currentUserId(): string | null {
-    return this.userId;
+  async markAsRead(notificationId: string, _userId?: string): Promise<void> {
+    try {
+      const { markNotificationReadInSupabase } = await import('./dataService');
+      await markNotificationReadInSupabase(notificationId);
+    } catch {}
+  }
+
+  async markAllAsRead(_userId?: string): Promise<void> {
+    try {
+      const { markAllNotificationsReadInSupabase } = await import('./dataService');
+      await markAllNotificationsReadInSupabase();
+    } catch {}
+  }
+
+  async refresh(): Promise<void> {
+    await this.fetchData();
+  }
+
+  async simulateNotification(userId: string, _type?: NotificationCategory): Promise<void> {
+    try {
+      const pick = RANDOM_TITLES[Math.floor(Math.random() * RANDOM_TITLES.length)];
+      const notification: Notification = {
+        id: `sim-${Date.now()}`,
+        userId,
+        category: pick.cat,
+        title: pick.title,
+        description: pick.desc,
+        icon: pick.icon,
+        color: pick.color,
+        read: false,
+        createdAt: new Date().toISOString(),
+      };
+      this.notifyListeners([notification]);
+    } catch {}
   }
 }
 
-// ── Singleton instance ──────────────────────────────────────────────────────
 export const notificationService = new NotificationService();

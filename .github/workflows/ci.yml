@@ -1,0 +1,130 @@
+name: CI — Nexi Locate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Lint & Type-check all workspaces
+  # ─────────────────────────────────────────────────────────────────────────
+  lint-and-typecheck:
+    name: Lint & Type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (all workspaces)
+        run: npx turbo run typecheck --parallel
+
+      - name: Lint (all workspaces)
+        run: npx turbo run lint --parallel
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Build web apps (business dashboard + admin dashboard)
+  # ─────────────────────────────────────────────────────────────────────────
+  build-web:
+    name: Build Web Apps
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build business-dashboard
+        run: npm run build
+        working-directory: apps/business-dashboard
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      - name: Build admin-dashboard
+        run: npm run build
+        working-directory: apps/admin-dashboard
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      - name: Upload business-dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: business-dashboard-dist
+          path: apps/business-dashboard/dist
+          retention-days: 7
+
+      - name: Upload admin-dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-dashboard-dist
+          path: apps/admin-dashboard/dist
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Mobile — Expo type-check + export check
+  # ─────────────────────────────────────────────────────────────────────────
+  check-mobile:
+    name: Mobile App Check
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check Expo config
+        run: npx expo config --type public
+        working-directory: apps/mobile
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 4: Shared packages build
+  # ─────────────────────────────────────────────────────────────────────────
+  build-packages:
+    name: Build Shared Packages
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npx turbo run build --filter=./packages/*

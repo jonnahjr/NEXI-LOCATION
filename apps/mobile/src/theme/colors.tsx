@@ -1,7 +1,8 @@
 // ─── Nexi Locate Theme System ────────────────────────────────────────────
 // Full light & dark modes with glassmorphism tokens, AI-vibe gradients & motion tokens
 
-import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ── Color Palettes ───────────────────────────────────────────────────────
 
@@ -162,11 +163,33 @@ const ThemeContext = createContext<ThemeContextType>({} as ThemeContextType);
 
 export const useTheme = () => useContext(ThemeContext);
 
+const THEME_STORAGE_KEY = 'nexi_theme_mode';
+
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [mode, setMode] = useState<ThemeMode>('dark');
+  const [mode, setModeState] = useState<ThemeMode>('light'); // Default = light
+
+  // Load saved theme on mount
+  useEffect(() => {
+    AsyncStorage.getItem(THEME_STORAGE_KEY)
+      .then((saved) => {
+        if (saved === 'dark' || saved === 'light') {
+          setModeState(saved);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const setMode = useCallback((newMode: ThemeMode) => {
+    setModeState(newMode);
+    AsyncStorage.setItem(THEME_STORAGE_KEY, newMode).catch(() => {});
+  }, []);
 
   const toggleTheme = useCallback(() => {
-    setMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
+    setModeState((prev) => {
+      const next = prev === 'dark' ? 'light' : 'dark';
+      AsyncStorage.setItem(THEME_STORAGE_KEY, next).catch(() => {});
+      return next;
+    });
   }, []);
 
   const value = useMemo(
@@ -177,7 +200,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       toggleTheme,
       setMode,
     }),
-    [mode, toggleTheme],
+    [mode, toggleTheme, setMode],
   );
 
   return (

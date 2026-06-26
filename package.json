@@ -16,13 +16,14 @@
   },
   "devDependencies": {
     "turbo": "latest",
-    "typescript": "^5.0.0"
+    "typescript": "~6.0.3"
   },
   "overrides": {
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
   "dependencies": {
+    "expo": "~56.0.0",
     "expo-linking": "^56.0.14"
   }
 }

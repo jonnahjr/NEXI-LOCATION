@@ -25,6 +25,49 @@ export class BusinessesController {
     );
   }
 
+  @Get('businesses/rank-nearby')
+  async rankNearby(
+    @Query('lat') lat: string,
+    @Query('lng') lng: string,
+    @Query('categoryId') categoryId?: string,
+    @Query('limit') limit?: string,
+    @Query('ratingWeight') ratingWeight?: string,
+    @Query('distanceWeight') distanceWeight?: string,
+  ): Promise<any[]> {
+    return this.service.rankNearby(
+      parseFloat(lat),
+      parseFloat(lng),
+      categoryId,
+      limit ? parseInt(limit, 10) : 50,
+      ratingWeight || distanceWeight ? {
+        ratingWeight: ratingWeight ? parseFloat(ratingWeight) : 0.3,
+        distanceWeight: distanceWeight ? parseFloat(distanceWeight) : 0.3,
+        reviewWeight: 0.2,
+        trendingWeight: 0.15,
+        verifiedBoost: 0.05,
+      } : undefined,
+    );
+  }
+
+  @Get('businesses/bounds')
+  async findByBounds(
+    @Query('swLat') swLat: string,
+    @Query('swLng') swLng: string,
+    @Query('neLat') neLat: string,
+    @Query('neLng') neLng: string,
+    @Query('categoryId') categoryId?: string,
+    @Query('limit') limit?: string,
+  ): Promise<Business[]> {
+    return this.service.findByBounds(
+      parseFloat(swLat),
+      parseFloat(swLng),
+      parseFloat(neLat),
+      parseFloat(neLng),
+      categoryId,
+      limit ? parseInt(limit, 10) : 200,
+    );
+  }
+
   @Get('businesses/:id')
   async findById(@Param('id') id: string): Promise<Business> {
     return this.service.findById(id);

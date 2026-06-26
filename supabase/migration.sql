@@ -10,6 +10,7 @@
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "vector";
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- HELPER: Idempotent type creation
@@ -176,6 +177,9 @@ CREATE INDEX IF NOT EXISTS idx_businesses_city ON businesses(city);
 CREATE INDEX IF NOT EXISTS idx_businesses_status ON businesses(status);
 CREATE INDEX IF NOT EXISTS idx_businesses_owner ON businesses(owner_id);
 CREATE INDEX IF NOT EXISTS idx_businesses_location ON businesses(latitude, longitude);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS embedding vector(1536);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS embedding_text TEXT;
+CREATE INDEX IF NOT EXISTS idx_businesses_embedding ON businesses USING hnsw (embedding vector_cosine_ops);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 4. REVIEWS
@@ -1022,4 +1026,376 @@ ON CONFLICT (id) DO UPDATE SET
 -- 1 Central Bank | 1 Stock Exchange | 1 Commodity Exchange
 -- 4 Mobile Money Platforms | 2 Fintech Companies | ATMs across city
 
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 16. BUSINESS PROMOTIONS (Monetization layer)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  CREATE TYPE promotion_type AS ENUM ('featured', 'boosted', 'banner');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS business_promotions (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  type            promotion_type NOT NULL,
+  starts_at       TIMESTAMPTZ NOT NULL,
+  ends_at         TIMESTAMPTZ NOT NULL,
+  price_paid      REAL,
+  payment_ref     TEXT,
+  active          BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotions_active ON business_promotions(business_id, active);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 17. USER BEHAVIOR (Recommendation fuel)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  CREATE TYPE behavior_action AS ENUM ('view', 'save', 'checkin', 'review', 'search_click', 'photo_upload', 'share');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS user_behavior (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  action          behavior_action NOT NULL,
+  category_id     TEXT REFERENCES categories(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_behavior_user ON user_behavior(user_id, action);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 18. USER CATEGORY AFFINITY (Pre-computed preferences)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS user_category_affinity (
+  user_id         UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  category_id     TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  score           REAL NOT NULL DEFAULT 0.1,
+  interaction_count INTEGER NOT NULL DEFAULT 0,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, category_id)
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 19. TRENDING SCORES
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  CREATE TYPE trending_period AS ENUM ('daily', 'weekly');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS trending_scores (
+  business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  period          trending_period NOT NULL,
+  score           REAL NOT NULL DEFAULT 0,
+  rank            INTEGER,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (business_id, period)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trending_scores ON trending_scores(period, score DESC);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 20. SEARCH LOGS (Analytics)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS search_logs (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  query           TEXT NOT NULL,
+  result_count    INTEGER NOT NULL DEFAULT 0,
+  clicked_business_id TEXT REFERENCES businesses(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 21. CITIES (Multi-city Support)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cities (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  country         TEXT NOT NULL DEFAULT 'Ethiopia',
+  latitude        REAL NOT NULL,
+  longitude       REAL NOT NULL,
+  timezone        TEXT NOT NULL DEFAULT 'Africa/Addis_Ababa',
+  active          BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+INSERT INTO cities (id, name, latitude, longitude) VALUES 
+('addis-ababa', 'Addis Ababa', 9.03, 38.74),
+('dire-dawa', 'Dire Dawa', 9.6, 41.86),
+('bahir-dar', 'Bahir Dar', 11.59, 37.39)
+ON CONFLICT (id) DO NOTHING;
+
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS city_id TEXT REFERENCES cities(id) ON DELETE SET NULL;
+UPDATE businesses SET city_id = 'addis-ababa' WHERE city_id IS NULL;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FTS: Postgres Full-Text Search
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS search_vector tsvector;
+CREATE INDEX IF NOT EXISTS idx_businesses_fts ON businesses USING gin(search_vector);
+
+CREATE OR REPLACE FUNCTION update_business_search_vector()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.search_vector = 
+    setweight(to_tsvector('english', coalesce(NEW.name, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(NEW.category, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(NEW.description, '')), 'C') ||
+    setweight(to_tsvector('english', coalesce(array_to_string(NEW.features, ' '), '')), 'D');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN DROP TRIGGER IF EXISTS trg_business_search_vector ON businesses; CREATE TRIGGER trg_business_search_vector BEFORE INSERT OR UPDATE ON businesses FOR EACH ROW EXECUTE FUNCTION update_business_search_vector(); END $$;
+
+-- Update existing rows to populate search_vector
+UPDATE businesses SET id = id WHERE search_vector IS NULL;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SUPPLEMENTAL: Business Promotions, Behaviors, FTS, Trending (new_tables.sql)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 16. BUSINESS PROMOTIONS (Monetization layer)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  CREATE TYPE promotion_type AS ENUM ('featured', 'boosted', 'banner');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS business_promotions (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  type            promotion_type NOT NULL,
+  starts_at       TIMESTAMPTZ NOT NULL,
+  ends_at         TIMESTAMPTZ NOT NULL,
+  price_paid      REAL,
+  payment_ref     TEXT,
+  active          BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotions_active ON business_promotions(business_id, active);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 17. USER BEHAVIOR (Recommendation fuel)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  CREATE TYPE behavior_action AS ENUM ('view', 'save', 'checkin', 'review', 'search_click', 'photo_upload', 'share');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS user_behavior (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  action          behavior_action NOT NULL,
+  category_id     TEXT REFERENCES categories(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_behavior_user ON user_behavior(user_id, action);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 18. USER CATEGORY AFFINITY (Pre-computed preferences)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS user_category_affinity (
+  user_id         UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  category_id     TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  score           REAL NOT NULL DEFAULT 0.1,
+  interaction_count INTEGER NOT NULL DEFAULT 0,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, category_id)
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 19. TRENDING SCORES
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  CREATE TYPE trending_period AS ENUM ('daily', 'weekly');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS trending_scores (
+  business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  period          trending_period NOT NULL,
+  score           REAL NOT NULL DEFAULT 0,
+  rank            INTEGER,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (business_id, period)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trending_scores ON trending_scores(period, score DESC);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 20. SEARCH LOGS (Analytics)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS search_logs (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  query           TEXT NOT NULL,
+  result_count    INTEGER NOT NULL DEFAULT 0,
+  clicked_business_id TEXT REFERENCES businesses(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 21. CITIES (Multi-city Support)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cities (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  country         TEXT NOT NULL DEFAULT 'Ethiopia',
+  latitude        REAL NOT NULL,
+  longitude       REAL NOT NULL,
+  timezone        TEXT NOT NULL DEFAULT 'Africa/Addis_Ababa',
+  active          BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+INSERT INTO cities (id, name, latitude, longitude) VALUES 
+('addis-ababa', 'Addis Ababa', 9.03, 38.74),
+('dire-dawa', 'Dire Dawa', 9.6, 41.86),
+('bahir-dar', 'Bahir Dar', 11.59, 37.39)
+ON CONFLICT (id) DO NOTHING;
+
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS city_id TEXT REFERENCES cities(id) ON DELETE SET NULL;
+UPDATE businesses SET city_id = 'addis-ababa' WHERE city_id IS NULL;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FTS: Postgres Full-Text Search
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS search_vector tsvector;
+CREATE INDEX IF NOT EXISTS idx_businesses_fts ON businesses USING gin(search_vector);
+
+CREATE OR REPLACE FUNCTION update_business_search_vector()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.search_vector = 
+    setweight(to_tsvector('english', coalesce(NEW.name, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(NEW.category, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(NEW.description, '')), 'C') ||
+    setweight(to_tsvector('english', coalesce(array_to_string(NEW.features, ' '), '')), 'D');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN DROP TRIGGER IF EXISTS trg_business_search_vector ON businesses; CREATE TRIGGER trg_business_search_vector BEFORE INSERT OR UPDATE ON businesses FOR EACH ROW EXECUTE FUNCTION update_business_search_vector(); END $$;
+
+-- Update existing rows to populate search_vector
+UPDATE businesses SET id = id WHERE search_vector IS NULL;
+
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SUPPLEMENTAL: Reports, Moderation, Trust (migration_phase3_addendum.sql)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- NEXI LOCATE — Phase 3 Addendum
+-- Reports, Moderation Logs, Points Helper, Profile columns
+-- Run after migration.sql
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── reports ──────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS reports (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  reporter_id   UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  content_type  TEXT NOT NULL CHECK (content_type IN ('review','business','photo','user')),
+  content_id    TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','actioned','dismissed')),
+  created_at    TIMESTAMPTZ DEFAULT now(),
+  updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_reports_status   ON reports(status);
+CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports(reporter_id);
+
+ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
+
+-- Users can create reports; admins can manage all
+CREATE POLICY "reports_insert" ON reports
+  FOR INSERT WITH CHECK (auth.uid() = reporter_id);
+
+CREATE POLICY "reports_admin_all" ON reports
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid()
+      AND role IN ('admin', 'moderator')
+    )
+  );
+
+-- ── moderation_logs ───────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS moderation_logs (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  content_type  TEXT NOT NULL,
+  content_id    TEXT NOT NULL,
+  user_id       UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  result        TEXT NOT NULL CHECK (result IN ('approved','flagged','rejected')),
+  flags         TEXT[] DEFAULT '{}',
+  score         INTEGER DEFAULT 0,
+  created_at    TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_moderation_content ON moderation_logs(content_type, content_id);
+CREATE INDEX IF NOT EXISTS idx_moderation_user    ON moderation_logs(user_id);
+
+ALTER TABLE moderation_logs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "moderation_logs_admin" ON moderation_logs
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid()
+      AND role IN ('admin', 'moderator')
+    )
+  );
+
+-- ── Helper: increment_user_points (called by award-points edge function) ───────
+CREATE OR REPLACE FUNCTION increment_user_points(p_user_id UUID, p_points INTEGER)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  UPDATE profiles
+  SET
+    points       = COALESCE(points, 0) + p_points,
+    total_earned = COALESCE(total_earned, 0) + GREATEST(p_points, 0),
+    updated_at   = now()
+  WHERE id = p_user_id;
+END;
+$$;
+
+-- ── Profile columns required by trustService ───────────────────────────────────
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN DEFAULT FALSE;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS total_earned   INTEGER DEFAULT 0;
+
+-- ── Realtime: enable for reports so admin sees live queue updates ──────────────
+ALTER PUBLICATION supabase_realtime ADD TABLE reports;
+ALTER PUBLICATION supabase_realtime ADD TABLE moderation_logs;
 

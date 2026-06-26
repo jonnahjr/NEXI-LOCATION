@@ -36,7 +36,6 @@
       "expo-router",
       "expo-font",
       "expo-splash-screen",
-      "expo-status-bar",
       [
         "expo-location",
         {
@@ -63,7 +62,9 @@
         {
           "contactsPermission": "Nexi Locate needs access to your contacts to share places and invite friends."
         }
-      ]
+      ],
+      "expo-status-bar",
+      "expo-web-browser"
     ]
   }
 }

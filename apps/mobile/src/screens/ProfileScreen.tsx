@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAppStore, MOCK_REVIEWS_DATA, MOCK_GALLERY } from '../store/appStore';
 import { useTheme, SPACING, RADIUS } from '../theme/colors';
+import CitySelector from '../components/CitySelector';
 
 // ── Mock Data ────────────────────────────────────────────────────────────
 
@@ -87,8 +88,10 @@ export const ProfileScreen: React.FC = () => {
   const router = useRouter();
   const { colors, mode, toggleTheme } = useTheme();
   const { user, savedPlaces } = useAppStore();
+  const selectedCity = useAppStore(s => s.selectedCity);
   const [notifications, setNotifications] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [showCitySelector, setShowCitySelector] = useState(false);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -450,6 +453,16 @@ export const ProfileScreen: React.FC = () => {
           <View style={styles.sectionHeader}>
             <Text style={[styles.sectionTitle, { color: colors.text }]}>⚙ Settings</Text>
           </View>
+
+          {/* City Selector Row */}
+          <MenuRow
+            icon="location-outline"
+            iconColor="#10B981"
+            label="Current City"
+            sublabel={selectedCity || 'Addis Ababa'}
+            onPress={() => setShowCitySelector(true)}
+            right={<Ionicons name="chevron-forward" size={18} color={colors.textMuted} />}
+          />
           {SETTINGS_ITEMS.map((item, i) => {
             if (item.label === 'Notifications') {
               return (
@@ -537,6 +550,12 @@ export const ProfileScreen: React.FC = () => {
 
         <View style={{ height: SPACING.huge + SPACING.xxl }} />
       </ScrollView>
+
+      {/* City Selector Modal */}
+      <CitySelector
+        visible={showCitySelector}
+        onClose={() => setShowCitySelector(false)}
+      />
     </View>
   );
 };

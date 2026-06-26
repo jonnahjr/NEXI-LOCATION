@@ -1,22 +1,13 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import * as SplashScreen from 'expo-splash-screen';
 import { View, Platform, StyleSheet, Text } from 'react-native';
 import { useTheme } from '../../src/theme/colors';
 import { useAppStore } from '../../src/store/appStore';
 
-SplashScreen.preventAutoHideAsync();
-
 export default function TabLayout() {
   const { colors } = useTheme();
   const unreadCount = useAppStore((state) => state.unreadCount);
-
-  useEffect(() => {
-    (async () => {
-      await SplashScreen.hideAsync();
-    })();
-  }, []);
 
   return (
     <>

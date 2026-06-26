@@ -50,6 +50,13 @@ export class Business {
   @Column({ default: '' })
   address: string;
 
+  // ── Vector Embedding ────────────────────────────────────────────────
+  @Column('text', { nullable: true })
+  embedding: string;  // JSON-serialized vector array
+
+  @Column('text', { nullable: true })
+  embeddingText: string;  // The text that was embedded (for debugging)
+
   @CreateDateColumn()
   createdAt: Date;
 

@@ -21,6 +21,7 @@ import { useRouter } from 'expo-router';
 import { useAppStore, Business } from '../store/appStore';
 import { useTheme, SPACING, RADIUS } from '../theme/colors';
 import { haversineKm, formatDistance, fetchBusinesses } from '../services/dataService';
+import { smartSearch, fetchTrendingSearches } from '../services/searchService';
 import { searchPlaces, mapPlaceTypeToCategory, getCategoryLabel, getPhotoUrl } from '../services/osmPlaces';
 import type { PlaceResult } from '../services/osmPlaces';
 import * as Location from 'expo-location';
@@ -50,14 +51,6 @@ const EXAMPLE_SEARCHES = [
   'Pharmacy near me',
   'Traditional Ethiopian food',
   'Best breakfast in Addis',
-];
-
-const TRENDING_SEARCHES = [
-  { label: 'Best Coffee Shops', icon: '☕' },
-  { label: 'Top Restaurants', icon: '🍽️' },
-  { label: 'Family Hotels', icon: '🏨' },
-  { label: 'Popular Attractions', icon: '🎯' },
-  { label: 'Weekend Destinations', icon: '🌴' },
 ];
 
 // ── Filter Types ─────────────────────────────────────────────────────────
@@ -128,6 +121,12 @@ export const SearchScreen: React.FC = () => {
     'Traditional Food',
     'Open Pharmacy',
   ]);
+  const [dynamicTrending, setDynamicTrending] = useState<{label: string, icon: string}[]>([
+    { label: 'Best Coffee Shops', icon: '☕' },
+    { label: 'Top Restaurants', icon: '🍽️' },
+    { label: 'Family Hotels', icon: '🏨' },
+    { label: 'Popular Attractions', icon: '🎯' },
+  ]);
   const [activeResultTab, setActiveResultTab] = useState('All');
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [filters, setFilters] = useState<FilterState>({
@@ -141,6 +140,20 @@ export const SearchScreen: React.FC = () => {
   const sbTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<TextInput>(null);
   const miniMapRef = useRef<any>(null);
+
+  // ── Initial load dynamic data ──────────────────────────────────────────
+  useEffect(() => {
+    async function loadTrending() {
+      const trending = await fetchTrendingSearches(5);
+      if (trending && trending.length > 0) {
+        setDynamicTrending(trending.map(t => ({
+          label: t,
+          icon: extractCategoryFromQuery(t) ? getEmoji(extractCategoryFromQuery(t)) : '🔥'
+        })));
+      }
+    }
+    loadTrending();
+  }, []);
 
   // ── Request GPS on mount ──────────────────────────────────────────────
   useEffect(() => {
@@ -246,12 +259,14 @@ export const SearchScreen: React.FC = () => {
           .replace(/\b(near|in|around|at|close to|by)\s+\S+/gi, '')
           .trim();
 
-        const results = await fetchBusinesses(
-          extractedCat || undefined,
-          cleanQuery || undefined,
-          userLocation?.latitude,
-          userLocation?.longitude,
-        );
+        const results = await smartSearch({
+          query: cleanQuery,
+          categoryId: extractedCat || undefined,
+          userLat: userLocation?.latitude,
+          userLng: userLocation?.longitude,
+          cityId: useAppStore.getState().selectedCity,
+          limit: 50
+        });
         setSupabaseResults(results);
       } catch {
         setSupabaseResults([]);
@@ -569,7 +584,7 @@ export const SearchScreen: React.FC = () => {
             <View style={styles.section}>
               <Text style={[styles.sectionTitle, { color: colors.text }]}>🔥 Trending Searches</Text>
               <View style={styles.trendGrid}>
-                {TRENDING_SEARCHES.map((item, idx) => (
+                {dynamicTrending.map((item, idx) => (
                   <TouchableOpacity
                     key={idx}
                     onPress={() => handleSearch(item.label)}

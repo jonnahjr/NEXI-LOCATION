@@ -16,11 +16,19 @@ import { GENERATED_MAP_HTML } from './webMapHtml';
 const WebView = Platform.OS === 'web' ? null : require('react-native-webview').WebView;
 
 // ── Types ────────────────────────────────────────────────────────────────
+export interface Bounds {
+  northEast: { lat: number; lng: number };
+  southWest: { lat: number; lng: number };
+}
+
 export interface Region {
   latitude: number;
   longitude: number;
   latitudeDelta: number;
   longitudeDelta: number;
+  zoom?: number;
+  northEast?: { lat: number; lng: number };
+  southWest?: { lat: number; lng: number };
 }
 
 export interface MapMarkerData {
@@ -43,6 +51,7 @@ export interface WebMapViewProps {
   initialRegion: Region;
   markers: MapMarkerData[];
   onRegionChangeComplete?: (region: Region) => void;
+  onBoundsChanged?: (bounds: Bounds, zoom: number) => void;
   onMapReady?: () => void;
   onMarkerPress?: (id: string) => void;
   onUserLocation?: (location: { latitude: number; longitude: number }) => void;
@@ -69,6 +78,7 @@ const WebMapView = forwardRef<WebMapViewRef, WebMapViewProps>((props, ref) => {
     initialRegion,
     markers,
     onRegionChangeComplete,
+    onBoundsChanged,
     onMapReady,
     onMarkerPress,
     onUserLocation,
@@ -125,6 +135,15 @@ const WebMapView = forwardRef<WebMapViewRef, WebMapViewProps>((props, ref) => {
             break;
           case 'regionChange':
             onRegionChangeComplete?.(data.payload);
+            if (data.payload.northEast && data.payload.southWest && data.payload.zoom != null) {
+              onBoundsChanged?.(
+                {
+                  northEast: data.payload.northEast,
+                  southWest: data.payload.southWest,
+                },
+                data.payload.zoom,
+              );
+            }
             break;
           case 'markerPress':
             onMarkerPress?.(data.payload.id);
@@ -138,7 +157,7 @@ const WebMapView = forwardRef<WebMapViewRef, WebMapViewProps>((props, ref) => {
         }
       } catch {}
     },
-    [onMapReady, onRegionChangeComplete, onMarkerPress, onUserLocation, onLayerChange],
+    [onMapReady, onRegionChangeComplete, onBoundsChanged, onMarkerPress, onUserLocation, onLayerChange],
   );
 
   // ── Send markers to WebView when they change ───────────────────────────
@@ -180,6 +199,19 @@ const WebMapView = forwardRef<WebMapViewRef, WebMapViewProps>((props, ref) => {
     true;
   `;
 
+  // ── Cleanup on unmount ────────────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      // Stop WebView loading to prevent memory leaks
+      if (webViewRef.current) {
+        try {
+          webViewRef.current.stopLoading();
+        } catch {}
+        webViewRef.current = null;
+      }
+    };
+  }, []);
+
   return (
     <View style={[styles.container, style]}>
       {Platform.OS === 'web' ? (
@@ -206,6 +238,8 @@ const WebMapView = forwardRef<WebMapViewRef, WebMapViewProps>((props, ref) => {
           androidLayerType="hardware"
           // Inject initial region before tiles load (both iOS and Android)
           injectedJavaScript={injectedJS}
+          // Prevent unnecessary reloads when parent re-renders
+          key="nex-map-webview"
         />
       )}
     </View>

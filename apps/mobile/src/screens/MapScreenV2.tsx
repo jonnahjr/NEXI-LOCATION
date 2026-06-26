@@ -18,13 +18,58 @@ import {
     Alert,
     Share,
 } from 'react-native';
-import WebMapView, { WebMapViewRef, MapMarkerData, Region, MapLayerType } from '../components/WebMapView';
+import WebMapView, { WebMapViewRef, MapMarkerData, Region, MapLayerType, Bounds } from '../components/WebMapView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { useAppStore, Business } from '../store/appStore';
 import { RADIUS, SPACING, useTheme } from '../theme/colors';
-import { searchPlaces, mapPlaceTypeToCategory, getCategoryLabel, getPhotoUrl } from '../services/osmPlaces';
-import type { PlaceResult } from '../services/osmPlaces';
+import { searchPlaces, searchNearby, mapPlaceTypeToCategory, getCategoryLabel, getPhotoUrl } from '../services/googlePlaces';
+import { fetchBusinessesByBounds } from '../services/dataService';
+import type { PlaceResult } from '../services/googlePlaces';
+
+// ── In-Memory Map Cache (viewport-based) ──────────────────────────────────
+// Cache key format: "{zoom}-{boundsKey}" where boundsKey is rounded to 3 decimals
+// TTL: 30 seconds for small pans, 60 seconds for same region
+interface MapCacheEntry {
+  data: any[];
+  timestamp: number;
+  ttl: number;
+}
+const mapCache = new Map<string, MapCacheEntry>();
+const MAP_CACHE_TTL_SMALL = 30_000;   // 30s for small pans
+const MAP_CACHE_TTL_LARGE = 60_000;   // 60s for same region
+
+function getMapBoundsKey(bounds: Bounds): string {
+  const swLat = bounds.southWest.lat.toFixed(3);
+  const swLng = bounds.southWest.lng.toFixed(3);
+  const neLat = bounds.northEast.lat.toFixed(3);
+  const neLng = bounds.northEast.lng.toFixed(3);
+  return `${swLat}_${swLng}_${neLat}_${neLng}`;
+}
+
+function getCacheKey(bounds: Bounds, zoom: number, categoryId?: string): string {
+  return `z${zoom}-${getMapBoundsKey(bounds)}-${categoryId || 'all'}`;
+}
+
+function getCacheEntry(key: string): { data: any[] } | null {
+  const entry = mapCache.get(key);
+  if (!entry) return null;
+  const age = Date.now() - entry.timestamp;
+  if (age > entry.ttl) {
+    mapCache.delete(key);
+    return null;
+  }
+  return { data: entry.data };
+}
+
+function setCacheEntry(key: string, data: any[], ttl: number = MAP_CACHE_TTL_LARGE): void {
+  mapCache.set(key, { data, timestamp: Date.now(), ttl });
+  // Evict old entries if cache grows beyond 50
+  if (mapCache.size > 50) {
+    const oldest = [...mapCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
+    if (oldest) mapCache.delete(oldest[0]);
+  }
+}
 
 const { width, height } = Dimensions.get('window');
 const MAP_HEIGHT = height;
@@ -161,26 +206,33 @@ export const MapScreenV2: React.FC = () => {
   const [activeDiscovery, setActiveDiscovery] = useState<string | null>(null);
   const [showSavedLayer, setShowSavedLayer] = useState(false);
   const [showLayerPanel, setShowLayerPanel] = useState(false);
-  const [currentLayer, setCurrentLayer] = useState<MapLayerType>('dark');
+  const [currentLayer, setCurrentLayer] = useState<MapLayerType>('standard');
   const [isOffline, setIsOffline] = useState(false);
   const [sortBy, setSortBy] = useState('distance');
-  const [filterDistance, setFilterDistance] = useState<number>(50); // Default to 50 (no filter) so we can see all places
+  const [filterDistance, setFilterDistance] = useState<number>(2);
   const [filterOpenNow, setFilterOpenNow] = useState(false);
   const [filterVerified, setFilterVerified] = useState(false);
   const [filterRatingMin, setFilterRatingMin] = useState(0);
   const [pinPreviewBiz, setPinPreviewBiz] = useState<typeof businesses[0] | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
-  const [hasFetchedNearby, setHasFetchedNearby] = useState(false);
   const [apiResults, setApiResults] = useState<PlaceResult[]>([]);
+  const [nearbyResults, setNearbyResults] = useState<PlaceResult[]>([]);
   const [showTraffic, setShowTraffic] = useState(false);
   const [isSearchingApi, setIsSearchingApi] = useState(false);
+  const hasFetchedNearby = useRef(false);
 
   const mapRef = useRef<WebMapViewRef>(null);
   const searchInputRef = useRef<TextInput>(null);
   const sheetAnim = useRef(new Animated.Value(0)).current;
   const sheetPanY = useRef(new Animated.Value(0)).current;
   const aiInputRef = useRef<TextInput>(null);
+  
+  // ── Viewport-based fetch refs ─────────────────────────────────────────
+  const fetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [viewportBusinesses, setViewportBusinesses] = useState<any[]>([]);
+  const [viewportLoading, setViewportLoading] = useState(false);
+  const lastBoundsRef = useRef<string | null>(null);
 
   // ── Sheet animation helper (defined before PanResponder to avoid TDZ) ──
   const expandSheet = useCallback((mode: 'collapsed' | 'expanded' | 'full') => {
@@ -242,26 +294,55 @@ export const MapScreenV2: React.FC = () => {
     return `${dist.toFixed(1)} km`;
   }, [userLocation]);
 
-  // ── Local businesses from Supabase, sorted by real GPS distance ─────
-  const localBusinesses = useMemo(() => {
-    if (!userLocation) return businesses;
-    return [...businesses]
-      .map((b) => ({
+  // ── Merge nearby API results with local businesses ───────────────────
+  const mergedBusinesses = useMemo(() => {
+    // Priority: viewport-fetched data > nearby API results > store businesses
+    // Viewport data comes from the backend bbox query (fast, scoped to visible area)
+    if (viewportBusinesses.length > 0) {
+      return viewportBusinesses.map((b: any) => ({
         ...b,
+        source: 'viewport',
         distance: getRealDistance(b.latitude, b.longitude),
-      }))
-      .sort((a, b) => {
-        const da = haversineDistance(
-          userLocation.latitude, userLocation.longitude,
-          a.latitude, a.longitude,
-        );
-        const db = haversineDistance(
-          userLocation.latitude, userLocation.longitude,
-          b.latitude, b.longitude,
-        );
-        return da - db;
-      });
-  }, [businesses, userLocation, getRealDistance]);
+      }));
+    }
+
+    if (nearbyResults.length === 0) {
+      // Fallback: store businesses with real distances
+      return businesses.map((b: any) => ({
+        ...b,
+        source: 'local',
+        distance: getRealDistance(b.latitude, b.longitude),
+      }));
+    }
+    
+    // Nearby API results merged with store businesses
+    const apiBiz = nearbyResults.map((place) => {
+      const lat = place.geometry.location.lat;
+      const lng = place.geometry.location.lng;
+      return {
+        id: place.place_id,
+        name: place.name,
+        category: getCategoryLabel(place.types || []),
+        categoryId: mapPlaceTypeToCategory(place.types || []),
+        rating: place.rating || 0,
+        reviews: place.user_ratings_total || 0,
+        distance: getRealDistance(lat, lng),
+        latitude: lat,
+        longitude: lng,
+        image: place.photos?.[0]
+          ? getPhotoUrl(place.photos[0].photo_reference, 400)
+          : 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=400',
+        verified: place.business_status === 'OPERATIONAL',
+        description: place.formatted_address || place.vicinity || '',
+        hours: place.opening_hours?.open_now ? 'Open Now (AM)' : undefined,
+        address: place.formatted_address || place.vicinity || '',
+        source: 'google_api',
+      };
+    });
+    
+    const localBiz = businesses.map((b: any) => ({ ...b, source: 'local' }));
+    return [...apiBiz, ...localBiz];
+  }, [viewportBusinesses, nearbyResults, businesses, getRealDistance]);
 
   // ── Map Google Places API results to Business-like objects ─────────────
   const mappedApiResults = useMemo(() => {
@@ -291,26 +372,21 @@ export const MapScreenV2: React.FC = () => {
     });
   }, [apiResults, getRealDistance]);
 
-  // ── Filtered & Sorted Businesses ───────────────────────────────────
+  // ── Filtered & Sorted Businesses (with real GPS distances) ───────────
   const filteredBusinesses = useMemo(() => {
-    const hasSearchText = searchText.trim().length > 0;
+    // Determine source: API results when searching, local businesses otherwise
     let results: any[];
+    const isApiMode = mappedApiResults.length > 0;
     
-    if (hasSearchText) {
-      // If user typed a search, show OSM results + local results that match the search (already filtered in dataService)
-      results = [...localBusinesses, ...mappedApiResults];
+    if (isApiMode) {
+      results = mappedApiResults;
     } else {
-      // No search text: show all local businesses + any nearby auto-fetched OSM places
-      results = [...localBusinesses, ...mappedApiResults];
+      // Calculate real GPS distances for merged businesses (local + Google API)
+      results = mergedBusinesses.map((b: any) => ({
+        ...b,
+        distance: getRealDistance(b.latitude, b.longitude),
+      }));
     }
-    
-    // Deduplicate by ID just in case
-    const uniqueIds = new Set();
-    results = results.filter(b => {
-      if (uniqueIds.has(b.id)) return false;
-      uniqueIds.add(b.id);
-      return true;
-    });
 
     // Category filter (applies to both local and API results)
     if (activeFilter !== 'all') {
@@ -318,7 +394,7 @@ export const MapScreenV2: React.FC = () => {
     }
 
     // Discovery layer (local data only)
-    if (!hasSearchText) {
+    if (!isApiMode) {
       if (activeDiscovery === 'trending') {
         results = [...results].sort((a: any, b: any) => b.reviews - a.reviews);
       } else if (activeDiscovery === 'top') {
@@ -330,7 +406,16 @@ export const MapScreenV2: React.FC = () => {
       }
     }
 
-
+    // Search text (local data only — API already searched via text query)
+    if (!isApiMode && searchText.trim()) {
+      const q = searchText.toLowerCase();
+      results = results.filter(
+        (b: any) =>
+          b.name.toLowerCase().includes(q) ||
+          b.category.toLowerCase().includes(q) ||
+          b.address.toLowerCase().includes(q),
+      );
+    }
 
     // Filter: Open Now
     if (filterOpenNow) {
@@ -356,11 +441,11 @@ export const MapScreenV2: React.FC = () => {
       return val; // already in km
     };
 
-    // Filter: Distance
+    // Filter: Distance (show all if distance field is '— km' from missing user location)
     if (filterDistance < 50) {
       results = results.filter((b: any) => {
         const dist = parseDistanceKm(b.distance);
-        return dist === 999 || dist <= filterDistance; // Don't filter out if location is unknown
+        return dist <= filterDistance;
       });
     }
 
@@ -376,16 +461,18 @@ export const MapScreenV2: React.FC = () => {
     }
 
     return results;
-  }, [localBusinesses, activeFilter, activeDiscovery, searchText, filterOpenNow, filterVerified, filterRatingMin, filterDistance, sortBy, mappedApiResults, getRealDistance]);
+  }, [mergedBusinesses, activeFilter, activeDiscovery, searchText, filterOpenNow, filterVerified, filterRatingMin, filterDistance, sortBy, mappedApiResults, getRealDistance]);
 
   // ── Saved Places Set (O(1) lookups) ────────────────────────────────────
   const savedSet = useMemo(() => new Set(savedPlaces), [savedPlaces]);
 
   // ── Clustered Markers ───────────────────────────────────────────────────
-  // User requested to remove clustering (blue circles with numbers)
   const clusteredMarkers = useMemo(() => {
-    return filteredBusinesses;
-  }, [filteredBusinesses]);
+    if (!currentRegion) return filteredBusinesses;
+    // Skip clustering when zoomed in close (latitudeDelta < 0.01)
+    if (currentRegion.latitudeDelta < 0.01) return filteredBusinesses;
+    return clusterMarkers(filteredBusinesses, currentRegion, 0.015);
+  }, [filteredBusinesses, currentRegion]);
 
   // ── Share business via native share sheet ────────────────────────────
   const shareBusiness = useCallback(async (biz: any) => {
@@ -492,97 +579,110 @@ export const MapScreenV2: React.FC = () => {
 
   // ── Selected Business ───────────────────────────────────────────────────
   const selectedBiz = selectedBusiness
-    ? filteredBusinesses.find((b: any) => b.id === selectedBusiness)
+    ? businesses.find((b) => b.id === selectedBusiness)
     : null;
 
-  // ── Request Location Permission on Mount (INSTANT cache first) ────────
+  // ── Request Location Permission on Mount ───────────────────────────────
   useEffect(() => {
-    let isMounted = true;
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') return;
-
-        // 1. Use LAST KNOWN location immediately (usually <50ms, cached by OS)
-        const cached = await Location.getLastKnownPositionAsync({
-          maxAge: 120000, // accept positions up to 2 minutes old
-        });
-        if (isMounted && cached) {
-          setUserLocation({
-            latitude: cached.coords.latitude,
-            longitude: cached.coords.longitude,
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
           });
-          console.log('📍 Using cached location instantly');
-        }
-
-        // 2. Fetch a FRESH GPS fix in parallel (takes 1-5s but more accurate)
-        const fresh = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        if (isMounted) {
           setUserLocation({
-            latitude: fresh.coords.latitude,
-            longitude: fresh.coords.longitude,
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
           });
-          console.log('📍 Refined with fresh GPS fix');
         }
       } catch (e) {
         console.log('Location permission error:', e);
       }
     })();
-    return () => { isMounted = false; };
   }, []);
 
-  // ── Search via OpenStreetMap API when user types a query ─────────────
+  // ── Search via Google Places API when user types a query ─────────────
   useEffect(() => {
-    let isMounted = true;
-    
-    // Auto-fetch nearby places on initial load if no search text is provided
     if (!searchText.trim()) {
-      if (userLocation && !hasFetchedNearby) {
-        setHasFetchedNearby(true);
-        (async () => {
-          if (isMounted) setIsSearchingApi(true);
-          try {
-            const results = await searchPlaces(
-              "restaurant cafe hotel bank hospital clinic",
-              { lat: userLocation.latitude, lng: userLocation.longitude },
-              5000
-            );
-            if (isMounted) setApiResults(results);
-          } catch {
-            if (isMounted) setApiResults([]);
-          } finally {
-            if (isMounted) setIsSearchingApi(false);
-          }
-        })();
-      } else if (!hasFetchedNearby) {
-        setApiResults([]);
-      }
+      setApiResults([]);
       return;
     }
 
     const timer = setTimeout(async () => {
-      if (isMounted) setIsSearchingApi(true);
+      setIsSearchingApi(true);
       try {
         const results = await searchPlaces(
           searchText,
           userLocation ? { lat: userLocation.latitude, lng: userLocation.longitude } : undefined,
           10000,
         );
-        if (isMounted) setApiResults(results);
+        setApiResults(results);
       } catch {
-        if (isMounted) setApiResults([]);
+        setApiResults([]);
       } finally {
-        if (isMounted) setIsSearchingApi(false);
+        setIsSearchingApi(false);
       }
-    }, 500);
+    }, 500); // debounce 500ms
 
-    return () => {
-      isMounted = false;
-      clearTimeout(timer);
-    };
+    return () => clearTimeout(timer);
   }, [searchText, userLocation]);
+
+  // ── Fetch real Google Business data via Nearby Search on mount ───────
+  useEffect(() => {
+    if (!mapReady || !userLocation || hasFetchedNearby.current) return;
+    hasFetchedNearby.current = true;
+    
+    const fetchNearby = async () => {
+      try {
+        // All categories user wants to see
+        const categoryTypes = [
+          'restaurant', 'cafe', 'hotel', 'hospital', 'pharmacy',
+          'bank', 'atm', 'gas_station', 'shopping_mall', 'supermarket',
+          'church', 'place_of_worship', 'mosque', 'school', 'university',
+          'police', 'fire_station', 'post_office', 'embassy', 'courthouse',
+          'night_club', 'bar', 'gym', 'spa', 'beauty_salon',
+          'electronics_store', 'convenience_store',
+        ];
+        const allResults: PlaceResult[] = [];
+        
+        // First: broad search (no type) to grab top 20 closest places of any type
+        const broadResults = await searchNearby(
+          userLocation.latitude, userLocation.longitude, 3000
+        ).catch(() => [] as PlaceResult[]);
+        broadResults.forEach(p => allResults.push(p));
+
+        // Then: fetch all specific categories in batches of 6 (parallel)
+        const BATCH = 6;
+        for (let i = 0; i < categoryTypes.length; i += BATCH) {
+          const batch = categoryTypes.slice(i, i + BATCH);
+          const batchResults = await Promise.all(
+            batch.map((type) =>
+              searchNearby(userLocation.latitude, userLocation.longitude, 3000, type)
+                .catch(() => [] as PlaceResult[])
+            )
+          );
+          batchResults.forEach((results) => results.forEach((place) => allResults.push(place)));
+        }
+        
+        // Deduplicate by place_id
+        const seen = new Set<string>();
+        const deduped: PlaceResult[] = [];
+        allResults.forEach((place) => {
+          if (place.place_id && !seen.has(place.place_id)) {
+            seen.add(place.place_id);
+            deduped.push(place);
+          }
+        });
+        
+        setNearbyResults(deduped);
+      } catch {
+        // Silently fail - local data will be used as fallback
+      }
+    };
+    
+    fetchNearby();
+  }, [mapReady, userLocation]);
 
   // ── Auto-center on user once both map is ready and location is known ──
   useEffect(() => {
@@ -596,10 +696,63 @@ export const MapScreenV2: React.FC = () => {
     }
   }, [mapReady, userLocation]);
 
-  // ── Region Change Handler ─────────────────────────────────────────────
-  const handleRegionChangeComplete = useCallback(async (region: Region) => {
+  // ── Debounced viewport fetch ────────────────────────────────────────────
+  const debouncedBoundsFetch = useCallback(
+    (bounds: Bounds, zoom: number, categoryId?: string) => {
+      if (fetchTimeoutRef.current) {
+        clearTimeout(fetchTimeoutRef.current);
+      }
+
+      // Build cache key
+      const cacheKey = getCacheKey(bounds, zoom, categoryId || activeFilter);
+      
+      // Check cache first
+      const cached = getCacheEntry(cacheKey);
+      if (cached) {
+        setViewportBusinesses(cached.data);
+        return;
+      }
+
+      // Debounce: wait 400ms before fetching on pan, 200ms after zoom ends
+      const delay = lastBoundsRef.current === cacheKey ? 600 : 400;
+      lastBoundsRef.current = cacheKey;
+
+      fetchTimeoutRef.current = setTimeout(async () => {
+        setViewportLoading(true);
+        try {
+          const data = await fetchBusinessesByBounds(
+            bounds.southWest,
+            bounds.northEast,
+            categoryId || activeFilter,
+          );
+          
+          // Cache with longer TTL if region hasn't changed much
+          const ttl = zoom > 14 ? MAP_CACHE_TTL_SMALL : MAP_CACHE_TTL_LARGE;
+          setCacheEntry(cacheKey, data, ttl);
+          
+          setViewportBusinesses(data);
+        } catch {
+          // Fall through — existing businesses stay
+        } finally {
+          setViewportLoading(false);
+        }
+      }, delay);
+    },
+    [activeFilter],
+  );
+
+  // ── Region Change Handler ───────────────────────────────────────────────
+  const handleRegionChangeComplete = useCallback((region: Region) => {
     setCurrentRegion(region);
-  }, []);
+    // Trigger viewport-based fetch if bounds are available
+    if (region.northEast && region.southWest && region.zoom != null) {
+      debouncedBoundsFetch(
+        { northEast: region.northEast, southWest: region.southWest },
+        region.zoom,
+        activeFilter,
+      );
+    }
+  }, [activeFilter, debouncedBoundsFetch]);
 
   // ── Center on user location ─────────────────────────────────────────────
   const centerOnUser = useCallback(() => {
@@ -614,7 +767,7 @@ export const MapScreenV2: React.FC = () => {
         600,
       );
     } else {
-      // Fallback
+      // Fallback to Addis Ababa if no location available
       mapRef.current?.animateToRegion(
         {
           latitude: 9.02,
@@ -645,32 +798,19 @@ export const MapScreenV2: React.FC = () => {
 
   // ── WebMapView Marker Press Handler ────────────────────────────────────
   const handleWebMarkerPress = useCallback((id: string) => {
+    // Find the business/cluster by id in filteredBusinesses
     const biz = filteredBusinesses.find((b: any) => b.id === id);
-    if (biz) {
-      if (biz.count) {
-        mapRef.current?.animateToRegion({
-          latitude: biz.latitude,
-          longitude: biz.longitude,
-          latitudeDelta: Math.max(0.005, currentRegion.latitudeDelta / 2),
-          longitudeDelta: Math.max(0.005, currentRegion.longitudeDelta / 2),
-        });
-      } else {
-        setPinPreviewBiz(biz);
-        setSelectedBusiness(id);
-        mapRef.current?.animateToRegion({
-          latitude: biz.latitude,
-          longitude: biz.longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        });
-        expandSheet('expanded');
-      }
+    if (biz && !biz.count) {
+      setPinPreviewBiz(biz);
+      setSelectedBusiness(id);
+      expandSheet('expanded');
     }
-  }, [filteredBusinesses, expandSheet, currentRegion]);
+    // Clusters zoom in via WebView handler
+  }, [filteredBusinesses, expandSheet]);
 
   // ── Filter Reset ────────────────────────────────────────────────────────
   const resetFilters = useCallback(() => {
-    setFilterDistance(50);
+    setFilterDistance(10);
     setFilterOpenNow(false);
     setFilterVerified(false);
     setFilterRatingMin(0);
@@ -825,26 +965,7 @@ export const MapScreenV2: React.FC = () => {
                 <Text style={styles.previewActionText}>Call</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => {
-                      const d = encodeURIComponent(JSON.stringify({
-                        name: biz.name,
-                        category: biz.category,
-                        categoryId: biz.categoryId,
-                        phone: biz.phone,
-                        website: biz.website,
-                        rating: biz.rating,
-                        reviews: biz.reviews,
-                        distance: biz.distance,
-                        latitude: biz.latitude,
-                        longitude: biz.longitude,
-                        image: biz.image,
-                        verified: biz.verified,
-                        description: biz.description,
-                        hours: biz.hours,
-                        address: biz.address,
-                      }));
-                      router.push(`/business/${biz.id}?data=${d}`);
-                    }}
+                onPress={() => router.push(`/business/${biz.id}`)}
                 style={[styles.previewAction, { backgroundColor: colors.violet }]}
               >
                 <Ionicons name="information-circle" size={16} color="#FFF" />
@@ -957,13 +1078,13 @@ export const MapScreenV2: React.FC = () => {
                     onPress={() => {
                       setPinPreviewBiz(biz);
                       setSelectedBusiness(biz.id);
+                      // Animate to business on map
                       mapRef.current?.animateToRegion({
                         latitude: biz.latitude,
                         longitude: biz.longitude,
-                        latitudeDelta: 0.01,
-                        longitudeDelta: 0.01,
-                      });
-                      expandSheet('expanded');
+                        latitudeDelta: 0.02,
+                        longitudeDelta: 0.02,
+                      }, 500);
                     }}
                     style={[styles.resultItem, { borderBottomColor: colors.border }]}
                     activeOpacity={0.7}
@@ -1005,7 +1126,7 @@ export const MapScreenV2: React.FC = () => {
                       </View>
                     </View>
                     <TouchableOpacity
-                      onPress={() => { toggleSavedPlace(biz.id); router.push('/saved'); }}
+                      onPress={() => toggleSavedPlace(biz.id)}
                       style={styles.resultSaveBtn}
                     >
                       <Ionicons
@@ -1306,7 +1427,6 @@ export const MapScreenV2: React.FC = () => {
           onMapReady={() => setMapReady(true)}
           onMarkerPress={handleWebMarkerPress}
           onUserLocation={(loc) => setUserLocation(loc)}
-          userLocation={userLocation}
           showsUserLocation={true}
           followsUserLocation={true}
           markers={markerData}
