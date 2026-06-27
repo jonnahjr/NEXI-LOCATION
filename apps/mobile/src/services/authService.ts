@@ -97,6 +97,9 @@ export async function signInWithGoogle(): Promise<{ user: User | null; error: st
       return { user: null, error: error?.message ?? 'Could not start Google sign-in.' };
     }
 
+    console.log('[Google OAuth] Opening URL:', data.url);
+    console.log('[Google OAuth] Redirect to:', redirectTo);
+
     // Open Google sign-in in a browser session
     const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
 

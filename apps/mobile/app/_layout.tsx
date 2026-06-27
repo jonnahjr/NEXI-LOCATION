@@ -203,7 +203,7 @@ function AppShell() {
       <SafeAreaProvider style={{ flex: 1 }}>
         <StatusBar style={colors.bg === '#F8FAFC' ? 'dark' : 'light'} />
         <Stack screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="onboarding" options={{ gestureEnabled: false }} />
+          <Stack.Screen name="onboarding" options={{ gestureEnabled: false, headerBackVisible: false }} />
           <Stack.Screen name="auth" options={{ gestureEnabled: false }} />
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         </Stack>

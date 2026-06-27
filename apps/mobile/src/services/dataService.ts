@@ -3,6 +3,7 @@
 // All user operations now use the live authenticated user ID.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { Platform } from 'react-native';
 import { supabase, rowToBusiness } from './supabase';
 import { getCurrentUserId } from './authService';
 import type { Business } from '../store/appStore';
@@ -79,8 +80,12 @@ export async function fetchBusinessesByBounds(
     });
     if (categoryId && categoryId !== 'all') params.set('categoryId', categoryId);
 
-    const API_URL = 'http://localhost:3001'; // NestJS default
-    const response = await fetch(`${API_URL}/businesses/bounds?${params}`);
+    const API_URL = Platform.select({
+      android: 'http://10.0.2.2:3000',
+      ios: 'http://localhost:3000',
+      default: 'http://localhost:3000',
+    });
+    const response = await fetch(`${API_URL}/api/businesses/bounds?${params}`);
     if (!response.ok) return [];
 
     const data = await response.json();

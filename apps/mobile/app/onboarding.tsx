@@ -114,6 +114,8 @@ export default function OnboardingScreen() {
     return () => { sub.remove(); clearTimeout(timer); };
   }, []);
 
+
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
       {/* 1. ScrollView is placed FIRST in the view tree so it sits underneath everything */}
