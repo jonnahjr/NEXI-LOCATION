@@ -69,7 +69,7 @@ export const NotificationsScreen: React.FC = () => {
     }
     // Navigate based on link if available
     if (notif.link) {
-      router.push(notif.link as any);
+      router.push(notif.link);
     }
   }, [markAsRead, router]);
 

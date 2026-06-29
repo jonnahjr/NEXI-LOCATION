@@ -20,7 +20,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
-import { useAppStore, MOCK_REVIEWS_DATA, MOCK_GALLERY } from '../store/appStore';
+import { fetchReviewsForBusiness, fetchBusinessPhotos } from '../services/dataService';
+import { useAppStore } from '../store/appStore';
 import { useTheme, SPACING, RADIUS } from '../theme/colors';
 
 const { width } = Dimensions.get('window');
@@ -79,6 +80,23 @@ export const BusinessDetailScreen: React.FC = () => {
   const { businesses, savedPlaces, toggleSavedPlace } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
+  const [realReviews, setRealReviews] = useState<any[]>([]);
+  const [realGallery, setRealGallery] = useState<any[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
+
+  // Fetch real reviews and photos on mount
+  React.useEffect(() => {
+    if (!id) return;
+    setDataLoading(true);
+    Promise.all([
+      fetchReviewsForBusiness(id),
+      fetchBusinessPhotos(id, 10),
+    ]).then(([reviews, photos]) => {
+      if (reviews.length > 0) setRealReviews(reviews);
+      if (photos.length > 0) setRealGallery(photos);
+      setDataLoading(false);
+    }).catch(() => setDataLoading(false));
+  }, [id]);
 
   const business = useMemo(() => {
     // First try local store
@@ -99,11 +117,27 @@ export const BusinessDetailScreen: React.FC = () => {
     setTimeout(() => setRefreshing(false), 1200);
   }, []);
 
-  // Reviews for this business
-  const businessReviews = useMemo(
-    () => MOCK_REVIEWS_DATA.filter((r) => r.businessId === id),
-    [id],
-  );
+  // Reviews for this business — from Supabase, fallback to mock
+  const businessReviews = useMemo(() => {
+    if (realReviews.length > 0) {
+      return realReviews.map((r: any) => {
+        const profile = r.profiles || {};
+        return {
+          id: r.id,
+          businessId: r.business_id,
+          userId: r.user_id,
+          userName: profile.name || 'User',
+          userAvatar: profile.avatar || undefined,
+          rating: r.rating,
+          text: r.text,
+          images: r.images || [],
+          helpful: r.helpful || 0,
+          createdAt: r.created_at ? new Date(r.created_at).toLocaleDateString() : '',
+        };
+      });
+    }
+    return [];
+  }, [realReviews]);
 
   const ratingBreakdown = useMemo(() => {
     const counts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
@@ -165,7 +199,9 @@ export const BusinessDetailScreen: React.FC = () => {
     } catch {}
   };
 
-  const galleryPhotos = [business.image, ...MOCK_GALLERY];
+  const galleryPhotos = realGallery.length > 0
+    ? [business.image, ...realGallery.map((p: any) => p.url)]
+    : [business.image];
 
   const displayedReviews = businessReviews;
 
@@ -288,12 +324,12 @@ export const BusinessDetailScreen: React.FC = () => {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={[styles.sectionTitle, { color: colors.text }]}>Photos</Text>
-            <TouchableOpacity onPress={() => Alert.alert('Photo Gallery', 'Full gallery coming soon.')}>
-              <Text style={[styles.seeAllText, { color: colors.primary }]}>See all 12+</Text>
+            <TouchableOpacity onPress={() => setSelectedPhotoIndex(0)}>
+              <Text style={[styles.seeAllText, { color: colors.primary }]}>See all</Text>
             </TouchableOpacity>
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.galleryScroll}>
-            {[business.image, ...MOCK_GALLERY.slice(0, 5)].map((photo, idx) => (
+            {galleryPhotos.slice(0, 6).map((photo, idx) => (
               <TouchableOpacity
                 key={idx}
                 onPress={() => setSelectedPhotoIndex(idx)}
@@ -444,9 +480,13 @@ export const BusinessDetailScreen: React.FC = () => {
             <View key={review.id} style={[styles.reviewCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <View style={styles.reviewHeader}>
                 <View style={[styles.reviewAvatar, { backgroundColor: colors.primaryGlow }]}>
-                  <Text style={[styles.reviewAvatarText, { color: colors.primary }]}>
-                    {review.userName.charAt(0)}
-                  </Text>
+                  {review.userAvatar ? (
+                    <Image source={{ uri: review.userAvatar }} style={styles.reviewAvatarImage} />
+                  ) : (
+                    <Text style={[styles.reviewAvatarText, { color: colors.primary }]}>
+                      {review.userName.charAt(0)}
+                    </Text>
+                  )}
                 </View>
                 <View style={styles.reviewMeta}>
                   <Text style={[styles.reviewName, { color: colors.text }]}>{review.userName}</Text>
@@ -461,7 +501,7 @@ export const BusinessDetailScreen: React.FC = () => {
               <Text style={[styles.reviewText, { color: colors.textSub }]}>{review.text}</Text>
               {review.images && review.images.length > 0 && (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.reviewImages}>
-                  {review.images.map((img, idx) => (
+                  {review.images.map((img: string, idx: number) => (
                     <Image key={idx} source={{ uri: img }} style={[styles.reviewImage, { borderColor: colors.border }]} />
                   ))}
                 </ScrollView>
@@ -650,8 +690,9 @@ const styles = StyleSheet.create({
   ratingBarCount: { fontSize: 11, fontWeight: '600', width: 28, textAlign: 'right' },
   reviewCard: { borderRadius: RADIUS.lg, padding: SPACING.lg, borderWidth: 1, marginBottom: SPACING.md },
   reviewHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.md },
-  reviewAvatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  reviewAvatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   reviewAvatarText: { fontSize: 16, fontWeight: '700' },
+  reviewAvatarImage: { width: 40, height: 40, borderRadius: 20 },
   reviewMeta: { flex: 1, marginLeft: SPACING.md },
   reviewName: { fontSize: 14, fontWeight: '700' },
   reviewStars: { flexDirection: 'row', gap: 1, marginTop: 2 },

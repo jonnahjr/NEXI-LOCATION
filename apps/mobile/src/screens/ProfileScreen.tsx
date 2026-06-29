@@ -9,14 +9,18 @@ import {
   RefreshControl,
   Image,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useAppStore, MOCK_REVIEWS_DATA, MOCK_GALLERY } from '../store/appStore';
+import * as ImagePicker from 'expo-image-picker';
+import { useAppStore } from '../store/appStore';
 import { useTheme, SPACING, RADIUS } from '../theme/colors';
 import CitySelector from '../components/CitySelector';
+import { uploadAvatar } from '../services/authService';
+import { fetchUserReviews, fetchUserPhotos } from '../services/dataService';
 
 // ── Mock Data ────────────────────────────────────────────────────────────
 
@@ -33,7 +37,7 @@ const MY_BUSINESSES = [
   { name: 'Nexyovi Coffee', status: 'Verified', icon: '☕' },
 ];
 
-const SETTINGS_ITEMS = [
+const SETTINGS_ITEMS: { icon: IoniconName; color: string; label: string; sub: string }[] = [
   { icon: 'person-outline', color: '#FAA330', label: 'Edit Profile', sub: 'Update your personal info' },
   { icon: 'notifications-outline', color: '#10B981', label: 'Notifications', sub: 'Push & email alerts' },
   { icon: 'shield-checkmark-outline', color: '#8B5CF6', label: 'Privacy', sub: 'Data & sharing preferences' },
@@ -43,7 +47,7 @@ const SETTINGS_ITEMS = [
   { icon: 'help-circle-outline', color: '#FAA330', label: 'Help & Support', sub: 'FAQs & contact us' },
 ];
 
-const SECURITY_ITEMS = [
+const SECURITY_ITEMS: { icon: IoniconName; color: string; label: string; sub: string }[] = [
   { icon: 'key-outline', color: '#8B5CF6', label: 'Change Password', sub: 'Update your password' },
   { icon: 'phone-portrait-outline', color: '#10B981', label: 'Phone Verification', sub: 'Connected: +251-91-234-5678' },
   { icon: 'mail-outline', color: '#3B82F6', label: 'Email Verification', sub: 'Verified: jonas@example.com' },
@@ -51,8 +55,10 @@ const SECURITY_ITEMS = [
   { icon: 'laptop-outline', color: '#EF4444', label: 'Active Sessions', sub: '2 active sessions' },
 ];  // ── Menu Row Component ───────────────────────────────────────────────────
 
+  type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
   interface MenuRowProps {
-    icon: string;
+    icon: IoniconName;
     iconColor: string;
     label: string;
     sublabel: string;
@@ -70,7 +76,7 @@ const SECURITY_ITEMS = [
         activeOpacity={0.7}
       >
         <View style={[styles.menuIconWrap, { backgroundColor: iconColor + '18' }]}>
-          <Ionicons name={icon as any} size={20} color={iconColor} />
+          <Ionicons name={icon} size={20} color={iconColor} />
         </View>
         <View style={styles.menuInfo}>
           <Text style={[styles.menuLabel, { color: colors.text }]}>{label}</Text>
@@ -92,14 +98,61 @@ export const ProfileScreen: React.FC = () => {
   const [notifications, setNotifications] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showCitySelector, setShowCitySelector] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+
+  const handlePickAvatar = useCallback(async () => {
+    // Request permission
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'We need access to your photo library to set a profile picture.');
+      return;
+    }
+
+    // Launch image picker
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.7,
+    });
+
+    if (result.canceled || !result.assets?.[0]?.uri) return;
+
+    setAvatarUploading(true);
+    try {
+      const { url, error } = await uploadAvatar(user!.id, result.assets[0].uri);
+      if (error) {
+        Alert.alert('Upload Failed', error);
+      } else if (url) {
+        // Update store with new avatar
+        useAppStore.getState().refreshProfile();
+      }
+    } catch {
+      Alert.alert('Error', 'Something went wrong uploading your photo.');
+    } finally {
+      setAvatarUploading(false);
+    }
+  }, [user]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     setTimeout(() => setRefreshing(false), 1200);
   }, []);
 
-  const myReviews = [...MOCK_REVIEWS_DATA].slice(0, 3);
-  const myPhotos = MOCK_GALLERY.slice(0, 6);
+  const [myReviews, setMyReviews] = useState<any[]>([]);
+  const [myPhotos, setMyPhotos] = useState<any[]>([]);
+
+  // Fetch real user data
+  React.useEffect(() => {
+    if (!user?.id) return;
+    Promise.all([
+      fetchUserReviews(user.id, 5),
+      fetchUserPhotos(user.id, 8),
+    ]).then(([reviews, photos]) => {
+      if (reviews.length > 0) setMyReviews(reviews);
+      if (photos.length > 0) setMyPhotos(photos);
+    }).catch(() => {});
+  }, [user?.id]);
   const level = user?.level || 1;
   const nextLevelPoints = (level + 1) * 500;
   const levelProgress = Math.min(((user?.points || 0) / nextLevelPoints) * 100, 100);
@@ -123,9 +176,27 @@ export const ProfileScreen: React.FC = () => {
       >
         {/* ──────────────── 1. PROFILE HEADER ──────────────── */}
         <View style={[styles.profileHeader, { paddingTop: insets.top + SPACING.xl }]}>
-          <View style={[styles.avatar, { backgroundColor: colors.primaryGlow, borderColor: colors.primary }]}>
-            <Text style={styles.avatarEmoji}>👤</Text>
-          </View>
+          <TouchableOpacity
+            onPress={handlePickAvatar}
+            activeOpacity={0.8}
+            disabled={avatarUploading}
+          >
+            <View style={[styles.avatar, { backgroundColor: colors.primaryGlow, borderColor: colors.primary }]}>
+              {user?.avatar ? (
+                <Image source={{ uri: user.avatar }} style={styles.avatarImage} />
+              ) : (
+                <Text style={styles.avatarEmoji}>👤</Text>
+              )}
+              {avatarUploading && (
+                <View style={styles.avatarLoading}>
+                  <ActivityIndicator size="small" color="#FFF" />
+                </View>
+              )}
+            </View>
+            <View style={[styles.avatarBadge, { backgroundColor: colors.primary, borderColor: colors.surface }]}>
+              <Ionicons name="camera" size={14} color="#FFF" />
+            </View>
+          </TouchableOpacity>
           <View style={styles.profileInfo}>
             <Text style={[styles.userName, { color: colors.text }]}>
               {user?.name || 'Jonas'}
@@ -265,7 +336,7 @@ export const ProfileScreen: React.FC = () => {
         <TouchableOpacity
           style={[styles.rewardsCard, { backgroundColor: colors.goldGlow, borderColor: colors.gold + '44' }]}
           activeOpacity={0.7}
-          onPress={() => router.push('/(tabs)/rewards' as any)}
+          onPress={() => router.push('/(tabs)/rewards')}
         >
           <View style={styles.rewardsCardTop}>
             <Text style={styles.rewardsEmoji}>🎁</Text>
@@ -298,32 +369,41 @@ export const ProfileScreen: React.FC = () => {
                 </TouchableOpacity>
               
           </View>
-          {myReviews.map((review) => (
-            <View
-              key={review.id}
-              style={[styles.reviewCard, { backgroundColor: colors.card, borderColor: colors.border }]}
-            >
-              <View style={styles.reviewTop}>
-                <Text style={styles.reviewBizIcon}>🏪</Text>
-                <View style={styles.reviewInfo}>
-                  <Text style={[styles.reviewBizName, { color: colors.text }]}>
-                    {review.id === 'rev1' ? 'Yod Abyssinia Restaurant' :
-                     review.id === 'rev2' ? 'Yod Abyssinia Restaurant' :
-                     review.id === 'rev6' ? 'Tomoca Coffee' : 'Coffee House'}
-                  </Text>
-                  <View style={styles.reviewStars}>
-                    {Array.from({ length: review.rating }).map((_, si) => (
-                      <Text key={si} style={styles.starIcon}>⭐</Text>
-                    ))}
+          {(myReviews.length > 0 ? myReviews : []).map((review: any) => {
+            const biz = review.businesses || {};
+            const stars = Math.round(review.rating);
+            return (
+              <View
+                key={review.id}
+                style={[styles.reviewCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+              >
+                <View style={styles.reviewTop}>
+                  <Text style={styles.reviewBizIcon}>🏪</Text>
+                  <View style={styles.reviewInfo}>
+                    <Text style={[styles.reviewBizName, { color: colors.text }]}>
+                      {biz.name || 'Business'}
+                    </Text>
+                    <View style={styles.reviewStars}>
+                      {Array.from({ length: stars }).map((_, si) => (
+                        <Text key={si} style={styles.starIcon}>⭐</Text>
+                      ))}
+                    </View>
                   </View>
+                  <Text style={[styles.reviewTime, { color: colors.textMuted }]}>
+                    {review.created_at ? new Date(review.created_at).toLocaleDateString() : ''}
+                  </Text>
                 </View>
-                <Text style={[styles.reviewTime, { color: colors.textMuted }]}>{review.createdAt}</Text>
+                <Text style={[styles.reviewText, { color: colors.textSub }]} numberOfLines={2}>
+                  {review.text}
+                </Text>
               </View>
-              <Text style={[styles.reviewText, { color: colors.textSub }]} numberOfLines={2}>
-                {review.text}
-              </Text>
-            </View>
-          ))}
+            );
+          })}
+          {myReviews.length === 0 && (
+            <Text style={{ color: colors.textMuted, fontSize: 13, textAlign: 'center', marginTop: SPACING.md }}>
+              No reviews yet. Start exploring and reviewing places!
+            </Text>
+          )}
         </View>
 
         {/* ──────────────── 8. MY PHOTOS ──────────────── */}
@@ -336,11 +416,16 @@ export const ProfileScreen: React.FC = () => {
             
           </View>
           <View style={styles.photoGrid}>
-            {myPhotos.map((photo, i) => (
-              <TouchableOpacity key={i} style={styles.photoWrap} activeOpacity={0.8}>
-                <Image source={{ uri: photo }} style={styles.photoThumb} />
+            {(myPhotos.length > 0 ? myPhotos : []).map((photo: any, i: number) => (
+              <TouchableOpacity key={photo.id || i} style={styles.photoWrap} activeOpacity={0.8}>
+                <Image source={{ uri: photo.url }} style={styles.photoThumb} />
               </TouchableOpacity>
             ))}
+            {myPhotos.length === 0 && (
+              <Text style={{ color: colors.textMuted, fontSize: 13, textAlign: 'center', width: '100%', marginTop: SPACING.md }}>
+                No photos yet. Upload photos when you visit places!
+              </Text>
+            )}
           </View>
         </View>
 
@@ -348,7 +433,7 @@ export const ProfileScreen: React.FC = () => {
         <TouchableOpacity
           style={[styles.collectionsCard, { backgroundColor: colors.card, borderColor: colors.border }]}
           activeOpacity={0.7}
-          onPress={() => router.push('/(tabs)/saved' as any)}
+          onPress={() => router.push('/(tabs)/saved')}
         >
           <View style={[styles.collectionsIcon, { backgroundColor: colors.primaryGlow }]}>
             <Ionicons name="bookmark" size={20} color={colors.primary} />
@@ -444,6 +529,7 @@ export const ProfileScreen: React.FC = () => {
               iconColor={item.color}
               label={item.label}
               sublabel={item.sub}
+              onPress={item.label === 'Change Password' ? () => router.push('/change-password') : undefined}
             />
           ))}
         </View>
@@ -464,6 +550,18 @@ export const ProfileScreen: React.FC = () => {
             right={<Ionicons name="chevron-forward" size={18} color={colors.textMuted} />}
           />
           {SETTINGS_ITEMS.map((item, i) => {
+            if (item.label === 'Edit Profile') {
+              return (
+                <MenuRow
+                  key={i}
+                  icon={item.icon}
+                  iconColor={item.color}
+                  label={item.label}
+                  sublabel={item.sub}
+                  onPress={() => router.push('/edit-profile')}
+                />
+              );
+            }
             if (item.label === 'Notifications') {
               return (
                 <View
@@ -471,7 +569,7 @@ export const ProfileScreen: React.FC = () => {
                   style={[styles.menuRow, { backgroundColor: colors.card, borderColor: colors.border }]}
                 >
                   <View style={[styles.menuIconWrap, { backgroundColor: item.color + '18' }]}>
-                    <Ionicons name={item.icon as any} size={20} color={item.color} />
+                    <Ionicons name={item.icon as IoniconName} size={20} color={item.color} />
                   </View>
                   <View style={styles.menuInfo}>
                     <Text style={[styles.menuLabel, { color: colors.text }]}>{item.label}</Text>
@@ -591,8 +689,37 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
+    overflow: 'hidden',
+  },
+  avatarImage: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
   },
   avatarEmoji: { fontSize: 32 },
+  avatarBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFF',
+  },
+  avatarLoading: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 36,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   profileInfo: { flex: 1, gap: SPACING.xs },
   userName: { fontSize: 22, fontWeight: '800', letterSpacing: -0.3 },
   userEmail: { fontSize: 13, fontWeight: '500' },

@@ -7,6 +7,7 @@ import 'react-native-url-polyfill/auto';
 import { supabase } from './supabase';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+import { makeRedirectUri } from 'expo-auth-session';
 import type { User } from '../store/appStore';
 
 // ── Sign Up ──────────────────────────────────────────────────────────────
@@ -83,7 +84,10 @@ export async function signUp(
 // ── Sign In with Google (OAuth) ───────────────────────────────────────────
 export async function signInWithGoogle(): Promise<{ user: User | null; error: string | null }> {
   try {
-    const redirectTo = Linking.createURL('/auth/callback');
+    const redirectTo = makeRedirectUri({
+      scheme: 'nexilocate',
+      path: 'auth/callback',
+    });
 
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -144,7 +148,7 @@ export async function signInWithGoogle(): Promise<{ user: User | null; error: st
       const googleName = meta.full_name ?? meta.name ?? sessionData.user.email?.split('@')[0] ?? 'User';
       const googleAvatar = meta.avatar_url ?? meta.picture ?? null;
 
-      await supabase.from('profiles').upsert({
+      const { error: upsertError } = await supabase.from('profiles').upsert({
         id: sessionData.user.id,
         auth_id: sessionData.user.id,
         email: sessionData.user.email ?? '',
@@ -159,6 +163,10 @@ export async function signInWithGoogle(): Promise<{ user: User | null; error: st
         photo_count: 0,
         city: 'Addis Ababa',
       });
+
+      if (upsertError) {
+        console.error('[authService] Google profile upsert error:', upsertError.message);
+      }
 
       profile = await fetchProfile(sessionData.user.id);
     }
@@ -241,10 +249,13 @@ export async function fetchProfile(authId: string): Promise<User | null> {
       .from('profiles')
       .select('*')
       .eq('id', authId)
-      .single();
+      .maybeSingle();
 
-    if (error || !data) {
-      console.warn('[authService] fetchProfile error:', error?.message);
+    if (error) {
+      console.warn('[authService] fetchProfile error:', error.message);
+      return null;
+    }
+    if (!data) {
       return null;
     }
 
@@ -306,6 +317,53 @@ export async function sendPasswordReset(
 export async function getCurrentUserId(): Promise<string | null> {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.user?.id ?? null;
+}
+
+// ── Upload Avatar to Supabase Storage ─────────────────────────────────────
+export async function uploadAvatar(
+  userId: string,
+  imageUri: string,
+): Promise<{ url: string | null; error: string | null }> {
+  try {
+    // Convert image URI to blob
+    const response = await fetch(imageUri);
+    const blob = await response.blob();
+
+    // Determine file extension from URI
+    const ext = imageUri.split('.').pop()?.toLowerCase() ?? 'jpg';
+    const fileName = `avatar-${Date.now()}.${ext}`;
+    const filePath = `${userId}/${fileName}`;
+
+    // Upload to Supabase Storage 'avatars' bucket
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(filePath, blob, {
+        contentType: blob.type || 'image/jpeg',
+        upsert: true,
+      });
+
+    if (uploadError) {
+      return { url: null, error: uploadError.message };
+    }
+
+    // Get public URL
+    const { data: publicUrlData } = supabase.storage
+      .from('avatars')
+      .getPublicUrl(filePath);
+
+    const avatarUrl = publicUrlData.publicUrl;
+
+    // Update profile with new avatar URL
+    const { error: updateError } = await updateProfile(userId, { avatar: avatarUrl });
+
+    if (updateError) {
+      return { url: null, error: updateError };
+    }
+
+    return { url: avatarUrl, error: null };
+  } catch (err: any) {
+    return { url: null, error: err?.message ?? 'Failed to upload avatar.' };
+  }
 }
 
 // ── Row → User mapper ─────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ export const PublicProfileScreen: React.FC = () => {
   const profile = {
     name: 'Hana K.',
     avatar: '👩',
+    avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop&crop=face',
     level: 12,
     points: 12500,
     reviews: 150,
@@ -48,7 +49,11 @@ export const PublicProfileScreen: React.FC = () => {
         {/* Profile Info */}
         <View style={styles.profileSection}>
           <View style={[styles.avatarWrap, { backgroundColor: colors.primaryGlow, borderColor: colors.primary }]}>
-            <Text style={styles.avatar}>{profile.avatar}</Text>
+            {profile.avatarUrl ? (
+              <Image source={{ uri: profile.avatarUrl }} style={styles.avatarImage} />
+            ) : (
+              <Text style={styles.avatar}>{profile.avatar}</Text>
+            )}
           </View>
           <Text style={[styles.name, { color: colors.text }]}>{profile.name}</Text>
           <View style={styles.badgeRow}>
@@ -127,8 +132,9 @@ const styles = StyleSheet.create({
   backBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
   content: { paddingHorizontal: SPACING.xl },
   profileSection: { alignItems: 'center', marginBottom: SPACING.xxl },
-  avatarWrap: { width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center', borderWidth: 2, marginBottom: SPACING.md },
+  avatarWrap: { width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center', borderWidth: 2, marginBottom: SPACING.md, overflow: 'hidden' },
   avatar: { fontSize: 36 },
+  avatarImage: { width: 80, height: 80, borderRadius: 40 },
   name: { fontSize: 24, fontWeight: '800', marginBottom: SPACING.sm },
   badgeRow: { flexDirection: 'row', gap: SPACING.sm, marginBottom: SPACING.md },
   badge: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: RADIUS.full, paddingHorizontal: SPACING.md, paddingVertical: SPACING.xs },

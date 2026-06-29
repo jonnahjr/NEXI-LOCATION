@@ -111,7 +111,7 @@ export async function reportContent(
             text: review.text,
             userId: review.user_id,
           },
-        }).catch(() => {});
+        }).catch(() => { });
       }
     }
 

@@ -140,21 +140,11 @@ function AppShell() {
         router.replace('/(tabs)');
       }
     } else {
-      AsyncStorage.getItem(ONBOARDING_KEY)
-        .then((done) => {
-          if (!mounted.current) return;
-          if (!done) {
-            router.replace('/onboarding');
-          } else {
-            if (currentRoute !== 'auth') {
-              router.replace('/auth/login');
-            }
-          }
-        })
-        .catch(() => {
-          if (!mounted.current) return;
-          router.replace('/onboarding');
-        });
+      if (currentRoute !== 'auth' && currentRoute !== 'onboarding') {
+        router.replace('/onboarding');
+      } else if (!currentRoute) {
+        router.replace('/onboarding');
+      }
     }
   }, [authLoading, isAuthenticated]);
 

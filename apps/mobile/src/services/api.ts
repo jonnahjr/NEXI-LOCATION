@@ -1,14 +1,14 @@
 // ── Base API Client ─────────────────────────────────────────────────────────
 // Handles REST API calls to the NestJS backend
 
-// Update this to your backend server URL
-// For Android emulator use 10.0.2.2, for iOS simulator use localhost
 import { Platform } from 'react-native';
+import { API_HOST, API_PORT } from '../config';
 
 // Android emulator: 10.0.2.2 maps to host machine's localhost
 // iOS simulator: localhost works directly
+// Physical device: use local network IP (set in config.ts)
 const DEV_API_HOST = Platform.select({
-  android: 'http://10.0.2.2:3000',
+  android: `http://${API_HOST}:${API_PORT}`,
   ios: 'http://localhost:3000',
   default: 'http://localhost:3000',
 });

@@ -6,6 +6,7 @@
 import { Platform } from 'react-native';
 import { supabase, rowToBusiness } from './supabase';
 import { getCurrentUserId } from './authService';
+import { API_HOST, API_PORT } from '../config';
 import type { Business } from '../store/appStore';
 import type { Notification } from './notifications';
 
@@ -81,7 +82,7 @@ export async function fetchBusinessesByBounds(
     if (categoryId && categoryId !== 'all') params.set('categoryId', categoryId);
 
     const API_URL = Platform.select({
-      android: 'http://10.0.2.2:3000',
+      android: `http://${API_HOST}:${API_PORT}`,
       ios: 'http://localhost:3000',
       default: 'http://localhost:3000',
     });
@@ -513,6 +514,114 @@ export async function submitReview(
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err?.message };
+  }
+}
+
+// ── Recent Reviews (across all businesses) ──────────────────────────────
+
+export async function fetchRecentReviews(limit = 10): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from('reviews')
+      .select(`
+        id, business_id, user_id, rating, text, images, helpful, status, created_at,
+        profiles:user_id (name, avatar)
+      `)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}
+
+// ── User's Own Reviews ─────────────────────────────────────────────────---
+
+export async function fetchUserReviews(userId: string, limit = 10): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from('reviews')
+      .select(`
+        id, business_id, user_id, rating, text, images, helpful, status, created_at,
+        businesses:business_id (name, image)
+      `)
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}
+
+// ── Photos for a Business ────────────────────────────────────────────────
+
+export async function fetchBusinessPhotos(businessId: string, limit = 20): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from('photos')
+      .select(`
+        id, business_id, user_id, url, caption, likes, created_at,
+        profiles:user_id (name, avatar)
+      `)
+      .eq('business_id', businessId)
+      .eq('status', 'approved')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}
+
+// ── Community Photos (recent across all businesses) ───────────────────────
+
+export async function fetchCommunityPhotos(limit = 20): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from('photos')
+      .select(`
+        id, business_id, user_id, url, caption, likes, created_at,
+        profiles:user_id (name, avatar)
+      `)
+      .eq('status', 'approved')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}
+
+// ── User's Own Photos ─────────────────────────────────────────────────────
+
+export async function fetchUserPhotos(userId: string, limit = 20): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from('photos')
+      .select(`
+        id, business_id, user_id, url, caption, likes, created_at,
+        businesses:business_id (name, image)
+      `)
+      .eq('user_id', userId)
+      .eq('status', 'approved')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
   }
 }
 

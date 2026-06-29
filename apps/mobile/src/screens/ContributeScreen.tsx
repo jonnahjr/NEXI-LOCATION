@@ -90,7 +90,7 @@ export const ContributeScreen: React.FC = () => {
             key={i}
             style={[styles.optionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
             activeOpacity={0.7}
-            onPress={() => router.push(opt.route as any)}
+            onPress={() => router.push(opt.route)}
           >
             <View style={[styles.optionIconWrap, { backgroundColor: opt.color + '22' }]}>
               <Text style={styles.optionIcon}>{opt.icon}</Text>

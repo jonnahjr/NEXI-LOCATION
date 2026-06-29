@@ -6,6 +6,8 @@
 import { supabase, rowToBusiness } from './supabase';
 import { getCurrentUserId } from './authService';
 import type { Business } from '../store/appStore';
+
+type BusinessWithScore = Business & { _distKm?: number; _rankScore?: number };
 import { haversineKm, formatDistance, sortByDistance } from '@nexi/shared';
 
 export interface SearchOptions {
@@ -53,12 +55,12 @@ export async function smartSearch(options: SearchOptions): Promise<Business[]> {
       return [];
     }
 
-    let businesses = data.map(rowToBusiness);
+    let businesses: Business[] = data.map(rowToBusiness);
 
     // 3. Rank results
     // If we have user location, rank by distance + popularity
     if (userLat != null && userLng != null) {
-      businesses = businesses
+      const scored: BusinessWithScore[] = businesses
         .map((b) => {
           const distKm = haversineKm(userLat, userLng, b.latitude, b.longitude);
           const tScore = b.trendingScore || 0;
@@ -76,7 +78,10 @@ export async function smartSearch(options: SearchOptions): Promise<Business[]> {
             _rankScore: rankScore,
           };
         })
-        .sort((a: any, b: any) => b._rankScore - a._rankScore); // Sort descending
+        .sort((a, b) => (b._rankScore ?? 0) - (a._rankScore ?? 0));
+
+      // Remove internal props and return clean businesses
+      businesses = scored.map(({ _distKm, _rankScore, ...clean }) => clean);
     } else {
       // Fallback: sort by rating & trending
       businesses.sort((a, b) => {
@@ -85,9 +90,6 @@ export async function smartSearch(options: SearchOptions): Promise<Business[]> {
         return scoreB - scoreA;
       });
     }
-
-    // Remove internal props
-    businesses.forEach(b => { delete (b as any)._distKm; delete (b as any)._rankScore; });
 
     logSearch(query, businesses.length).catch(() => {});
     return businesses;

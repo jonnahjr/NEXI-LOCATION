@@ -8,6 +8,7 @@ import 'react-native-url-polyfill/auto';
 
 import { createClient } from '@supabase/supabase-js';
 import type { Business } from '../store/appStore';
+import type { PromotionType } from '@nexi/types';
 
 // ── Credentials ────────────────────────────────────────────────────────────
 const SUPABASE_URL = 'https://cktqmupahwvrfuztnksl.supabase.co';
@@ -106,10 +107,10 @@ export function rowToBusiness(row: BusinessRow): Business {
     city: row.city ?? undefined,
     priceLevel: row.price_level ?? undefined,
     features: row.features ?? undefined,
-    status: (row.status as any) ?? 'active',
+    status: (row.status || 'active') as Business['status'],
     ownerId: row.owner_id ?? undefined,
     trendingScore: row.trending_score,
     isPromoted: row.is_promoted ?? false,
-    promotionType: (row.promotion_type as any) ?? undefined,
+    promotionType: (row.promotion_type || undefined) as PromotionType | undefined,
   };
 }

@@ -15,8 +15,8 @@ export default function TabLayout() {
         screenOptions={{
           headerShown: false,
           tabBarStyle: {
-            backgroundColor: colors.glassBg,
-            borderTopColor: colors.glassBorder,
+            backgroundColor: colors.surface,
+            borderTopColor: colors.border,
             borderTopWidth: 1,
             paddingBottom: Platform.OS === 'ios' ? 20 : 8,
             paddingTop: 8,
@@ -33,8 +33,8 @@ export default function TabLayout() {
             fontWeight: '600',
             letterSpacing: 0.3,
           },
-          tabBarActiveTintColor: colors.primary,
-          tabBarInactiveTintColor: colors.textMuted,
+          tabBarActiveTintColor: colors.text,
+          tabBarInactiveTintColor: colors.textSub,
           tabBarHideOnKeyboard: true,
         }}
       >
@@ -44,7 +44,7 @@ export default function TabLayout() {
             title: 'Home',
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.primaryGlow }]}>
-                <Ionicons name={focused ? 'home' : 'home-outline'} size={22} color={color} />
+                <Ionicons name="home" size={22} color={color} />
               </View>
             ),
           }}
@@ -55,7 +55,7 @@ export default function TabLayout() {
             title: 'Search',
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.primaryGlow }]}>
-                <Ionicons name={focused ? 'search' : 'search-outline'} size={22} color={color} />
+                <Ionicons name="search" size={22} color={color} />
               </View>
             ),
           }}
@@ -66,7 +66,7 @@ export default function TabLayout() {
             title: 'Map',
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.primaryGlow }]}>
-                <Ionicons name={focused ? 'map' : 'map-outline'} size={22} color={color} />
+                <Ionicons name="map" size={22} color={color} />
               </View>
             ),
           }}
@@ -76,8 +76,8 @@ export default function TabLayout() {
           options={{
             title: 'Contribute',
             tabBarIcon: ({ color, focused }) => (
-              <View style={[styles.contributeWrap, { backgroundColor: colors.primary, borderColor: colors.primaryLight }]}>
-                <Ionicons name="add" size={28} color="#FFF" />
+              <View style={[styles.contributeWrap, { backgroundColor: colors.text, borderColor: colors.textSub }]}>
+                <Ionicons name="add" size={28} color={colors.surface} />
               </View>
             ),
           }}
@@ -88,7 +88,7 @@ export default function TabLayout() {
             title: 'Rewards',
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.goldGlow }]}>
-                <Ionicons name={focused ? 'star' : 'star-outline'} size={22} color={color} />
+                <Ionicons name="star" size={22} color={color} />
               </View>
             ),
           }}
@@ -99,7 +99,7 @@ export default function TabLayout() {
             title: 'Saved',
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.accentGlow }]}>
-                <Ionicons name={focused ? 'heart' : 'heart-outline'} size={22} color={color} />
+                <Ionicons name="heart" size={22} color={color} />
               </View>
             ),
           }}
@@ -110,7 +110,7 @@ export default function TabLayout() {
             title: 'Profile',
             tabBarIcon: ({ color, focused }) => (
               <View style={[styles.tabIconWrap, focused && { backgroundColor: colors.violetGlow }]}>
-                <Ionicons name={focused ? 'person' : 'person-outline'} size={22} color={color} />
+                <Ionicons name="person" size={22} color={color} />
                 {unreadCount > 0 && (
                   <View style={[styles.badge, { backgroundColor: colors.danger }]}>
                     <Text style={styles.badgeText}>

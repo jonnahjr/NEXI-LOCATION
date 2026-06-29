@@ -9,6 +9,7 @@ import { getCurrentUserId } from './authService';
 import type { Business } from '../store/appStore';
 import { fetchUserCategoryAffinity, fetchSavedPlaceIds } from './dataService';
 import { fetchUserBehaviors } from './behaviorService';
+import type { BehaviorAction } from '@nexi/types';
 import {
   buildUserProfile,
   getSmartContext,
@@ -146,7 +147,7 @@ export async function buildRankingProfile(userId: string): Promise<UserProfile |
       categoryAffinities: affinities,
       visitedPlaceIds: visitedIds,
       savedPlaceIds: savedIds,
-      behaviors: behaviors as any,
+      behaviors: behaviors as Array<{ action: BehaviorAction; categoryId?: string }>,
       totalInteractions: behaviors?.length ?? 0,
     });
   } catch (error) {
@@ -171,7 +172,7 @@ export async function getRecommendedForUser(
       categoryAffinities: affinities,
       visitedPlaceIds: visitedIds,
       savedPlaceIds: savedIds,
-      behaviors: behaviors as any,
+      behaviors: behaviors as Array<{ action: BehaviorAction; categoryId?: string }>,
       totalInteractions: behaviors?.length ?? 0,
     });
 
@@ -226,7 +227,7 @@ export async function getRecommendedForUser(
         ? { latitude: userLat, longitude: userLng }
         : undefined,
       userProfile: profile,
-      behaviors: behaviors as any,
+      behaviors: behaviors as Array<{ action: BehaviorAction; categoryId?: string }>,
       categoryAffinities: affinities,
       limit: 15,
       allSavedBusinessCategories,
@@ -314,7 +315,7 @@ export async function getRankedWithExplanations(
         ? { latitude: userLat, longitude: userLng }
         : undefined,
       userProfile: profile,
-      behaviors: behaviors as any,
+      behaviors: behaviors as Array<{ action: BehaviorAction; categoryId?: string }>,
       categoryAffinities: affinities,
       limit: 20,
       allSavedBusinessCategories,

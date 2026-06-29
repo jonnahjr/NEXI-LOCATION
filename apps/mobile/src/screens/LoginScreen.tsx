@@ -10,6 +10,7 @@ import {
   Platform,
   Alert,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -51,13 +52,13 @@ export const LoginScreen: React.FC = () => {
 
     const { user, error } = await signInWithGoogle();
 
-    setLoading(false);
-
     if (error === 'cancelled') {
+      setLoading(false);
       return; // User cancelled — no need to show an alert
     }
 
     if (error) {
+      setLoading(false);
       Alert.alert('Google Sign-In Failed', error, [{ text: 'OK' }]);
       return;
     }
@@ -74,9 +75,8 @@ export const LoginScreen: React.FC = () => {
 
     const { user, error } = await signIn(email.trim(), password);
 
-    setLoading(false);
-
     if (error) {
+      setLoading(false);
       Alert.alert('Sign In Failed', error, [{ text: 'OK' }]);
       return;
     }
@@ -93,15 +93,8 @@ export const LoginScreen: React.FC = () => {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
-        {/* Back Button */}
-        <View style={[styles.header, { paddingTop: insets.top + SPACING.xl }]}>
-          <TouchableOpacity
-            onPress={() => router.back()}
-            style={[styles.backBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-          >
-            <Ionicons name="chevron-back" size={22} color={colors.text} />
-          </TouchableOpacity>
-        </View>
+        {/* Header padding */}
+        <View style={[styles.header, { paddingTop: insets.top + SPACING.xl }]} />
 
         {/* Logo */}
         <View style={styles.logoSection}>
@@ -201,7 +194,11 @@ export const LoginScreen: React.FC = () => {
               <ActivityIndicator size="small" color={colors.text} />
             ) : (
               <>
-                <Text style={styles.socialIcon}>🅶</Text>
+                <Image
+                  source={require('../../assets/google-logo.png')}
+                  style={styles.socialIconImage}
+                  resizeMode="contain"
+                />
                 <Text style={[styles.socialText, { color: colors.text }]}>Continue with Google</Text>
               </>
             )}
@@ -250,9 +247,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: SPACING.md, borderRadius: RADIUS.lg, paddingVertical: SPACING.md + 2, borderWidth: 1,
   },
-  socialIcon: { fontSize: 20 },
+  socialIconImage: { width: 22, height: 22 },
   socialText: { fontSize: 14, fontWeight: '600' },
   footer: { flexDirection: 'row', justifyContent: 'center', marginTop: SPACING.xxl },
   footerText: { fontSize: 13, fontWeight: '500' },
   footerLink: { fontSize: 13, fontWeight: '700' },
+
 });

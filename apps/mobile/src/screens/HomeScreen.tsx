@@ -16,12 +16,12 @@ import { useRouter } from 'expo-router';
 import { Card } from '../components/Card';
 import { BusinessCard } from '../components/BusinessCard';
 import { Button } from '../components/Button';
-import { useAppStore, MOCK_REVIEWS_DATA, MOCK_GALLERY, EARN_OPTIONS } from '../store/appStore';
+import { useAppStore, EARN_OPTIONS } from '../store/appStore';
 import { useTheme, SPACING, RADIUS, TYPOGRAPHY } from '../theme/colors';
 import WebMapView from '../components/WebMapView';
 import type { MapMarkerData, Region } from '../components/WebMapView';
 import * as Location from 'expo-location';
-import { haversineKm, formatDistance, fetchPromotedBusinesses, fetchTrendingBusinessIds, fetchReviewsForBusiness } from '../services/dataService';
+import { haversineKm, formatDistance, fetchPromotedBusinesses, fetchTrendingBusinessIds, fetchReviewsForBusiness, fetchRecentReviews, fetchCommunityPhotos } from '../services/dataService';
 import { getRecommendedForUser, getRankedWithExplanations } from '../services/recommendationService';
 import { fetchTrendingSearches } from '../services/searchService';
 const { width } = Dimensions.get('window');
@@ -74,6 +74,8 @@ export const HomeScreen: React.FC = () => {
   const [recommendedExplanations, setRecommendedExplanations] = useState<Record<string, any>>({});
   const [contextInfo, setContextInfo] = useState<string>('');
   const [trendingSearches, setTrendingSearches] = useState<string[]>(['Best coffee in Bole', 'Hotels near airport', 'Open pharmacy', 'Traditional food']);
+  const [realReviews, setRealReviews] = useState<any[]>([]);
+  const [communityPhotos, setCommunityPhotos] = useState<any[]>([]);
 
   // ── Computed Data ──────────────────────────────────────────────────────
   const nearbyPlaces = useMemo(() => {
@@ -142,10 +144,10 @@ export const HomeScreen: React.FC = () => {
         setRecommended(recs.slice(0, 5));
         setRecommendedExplanations(explanations);
         // Show smart context info
-        const firstExp = Object.values(explanations)[0] as any;
+        const firstExp: any = Object.values(explanations)[0];
         if (firstExp) {
           const parts: string[] = [];
-          if (firstExp.timeInfo) parts.push(firstExp.timeInfo);
+          if (firstExp.timeInfo) parts.push(firstExp.timeInfo as string);
           if (firstExp.isWeekend) parts.push('weekend');
           if (firstExp.isNewUser) parts.push('new user');
           setContextInfo(parts.join(' · '));
@@ -155,17 +157,37 @@ export const HomeScreen: React.FC = () => {
     loadRecommendations();
   }, [user?.id, userLocation]);
 
-  const latestReviews = useMemo(() =>
-    [...MOCK_REVIEWS_DATA].sort((a, b) => {
-      const order = ['1 day ago', '2 days ago', '3 days ago', '5 days ago', '1 week ago', '2 weeks ago'];
-      return order.indexOf(a.createdAt) - order.indexOf(b.createdAt);
-    }).slice(0, 5),
-  []);
+  // Fetch real reviews and photos
+  useEffect(() => {
+    async function loadData() {
+      const [reviews, photos] = await Promise.all([
+        fetchRecentReviews(8),
+        fetchCommunityPhotos(12),
+      ]);
+      if (reviews.length > 0) setRealReviews(reviews);
+      if (photos.length > 0) setCommunityPhotos(photos);
+    }
+    loadData();
+  }, []);
+
+  const latestReviews = realReviews;
 
   const reviewsWithBusiness = useMemo(() =>
-    latestReviews.map(rev => {
-      const biz = businesses.find(b => b.id === rev.businessId);
-      return { ...rev, businessName: biz?.name || 'Unknown', businessImage: biz?.image || '' };
+    latestReviews.map((rev: any) => {
+      const profile = rev.profiles || {};
+      const biz = businesses.find(b => b.id === rev.business_id);
+      return {
+        id: rev.id,
+        businessId: rev.business_id,
+        userName: profile.name || 'User',
+        userAvatar: profile.avatar || undefined,
+        rating: rev.rating,
+        text: rev.text,
+        createdAt: rev.created_at ? new Date(rev.created_at).toLocaleDateString() : '',
+        helpful: rev.helpful || 0,
+        businessName: biz?.name || 'Unknown',
+        businessImage: biz?.image || '',
+      };
     }),
   [latestReviews, businesses]);
 
@@ -289,9 +311,13 @@ export const HomeScreen: React.FC = () => {
               onPress={() => router.push('/profile')}
               style={[styles.avatarBtn, { borderColor: colors.primary }]}
             >
-              <Text style={[styles.avatarText, { color: colors.primary }]}>
-                {user?.name?.charAt(0) || 'J'}
-              </Text>
+              {user?.avatar ? (
+                <Image source={{ uri: user.avatar }} style={styles.avatarImageHome} />
+              ) : (
+                <Text style={[styles.avatarText, { color: colors.primary }]}>
+                  {user?.name?.charAt(0) || 'J'}
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -614,9 +640,13 @@ export const HomeScreen: React.FC = () => {
           </View>
 
           <View style={styles.photoGrid}>
-            {MOCK_GALLERY.slice(0, 8).map((url, idx) => (
-              <TouchableOpacity key={idx} style={styles.photoItem} activeOpacity={0.8}>
-                <Image source={{ uri: url }} style={styles.photoImg} resizeMode="cover" />
+            {(communityPhotos.length > 0 ? communityPhotos : Array.from({ length: 8 })).map((photo: any, idx: number) => (
+              <TouchableOpacity key={photo?.id || idx} style={styles.photoItem} activeOpacity={0.8}>
+                <Image
+                  source={{ uri: photo?.url || 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=400' }}
+                  style={styles.photoImg}
+                  resizeMode="cover"
+                />
               </TouchableOpacity>
             ))}
           </View>
@@ -638,9 +668,13 @@ export const HomeScreen: React.FC = () => {
               activeOpacity={0.7}
             >
               <View style={[styles.reviewAvatar, { backgroundColor: colors.primaryGlow }]}>
-                <Text style={[styles.reviewAvatarText, { color: colors.primary }]}>
-                  {rev.userName.charAt(0)}
-                </Text>
+                {rev.userAvatar ? (
+                  <Image source={{ uri: rev.userAvatar }} style={styles.reviewAvatarImage} />
+                ) : (
+                  <Text style={[styles.reviewAvatarText, { color: colors.primary }]}>
+                    {rev.userName.charAt(0)}
+                  </Text>
+                )}
               </View>
               <View style={styles.reviewInfo}>
                 <View style={styles.reviewTop}>
@@ -787,9 +821,10 @@ const styles = StyleSheet.create({
   avatarBtn: {
     width: 40, height: 40, borderRadius: 20,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2,
+    borderWidth: 2, overflow: 'hidden',
   },
   avatarText: { fontSize: 16, fontWeight: '800' },
+  avatarImageHome: { width: 40, height: 40, borderRadius: 20 },
 
   // ── Search ───────────────────────────────────────────────────────────
   searchSection: { paddingHorizontal: SPACING.xl, marginBottom: SPACING.xl },
@@ -933,9 +968,10 @@ const styles = StyleSheet.create({
   },
   reviewAvatar: {
     width: 40, height: 40, borderRadius: 20,
-    alignItems: 'center', justifyContent: 'center',
+    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
   reviewAvatarText: { fontSize: 16, fontWeight: '700' },
+  reviewAvatarImage: { width: 40, height: 40, borderRadius: 20 },
   reviewInfo: { flex: 1, gap: 2 },
   reviewTop: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
   reviewUser: { fontSize: 13, fontWeight: '700' },

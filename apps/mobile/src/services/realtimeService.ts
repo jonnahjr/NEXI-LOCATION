@@ -7,6 +7,20 @@ import { supabase } from './supabase';
 import type { Notification } from './notifications';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
+interface NotificationRow {
+  id: string;
+  user_id: string;
+  category: string;
+  title: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  link: string | null;
+  image_url: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
 type NotificationCallback = (notification: Notification) => void;
 type LeaderboardCallback = (entries: any[]) => void;
 type BusinessActivityCallback = (event: { type: string; businessId: string; data: any }) => void;
@@ -31,7 +45,7 @@ class RealtimeService {
         },
         (payload) => {
           if (payload.new) {
-            const row = payload.new as any;
+            const row = payload.new as NotificationRow;
             const notification: Notification = {
               id: row.id,
               userId: row.user_id,

@@ -95,10 +95,10 @@ export interface RewardOption {
 // ── Static data (unchanged by auth) ──────────────────────────────────────
 
 export const MOCK_REVIEWS_DATA: Review[] = [
-  { id: 'rev1', businessId: 'food-1', userId: 'u2', userName: 'John D.', rating: 5, text: 'Amazing food and fast service. The traditional coffee ceremony was unforgettable!', images: ['https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=200'], createdAt: '2 days ago', helpful: 24 },
-  { id: 'rev2', businessId: 'food-1', userId: 'u3', userName: 'Sarah M.', rating: 5, text: 'Best Ethiopian restaurant in Addis. The live music creates such a vibrant atmosphere.', createdAt: '1 week ago', helpful: 18 },
+  { id: 'rev1', businessId: 'food-1', userId: 'u2', userName: 'John D.', rating: 5, text: 'Amazing food and fast service. The traditional coffee ceremony was unforgettable!', images: ['https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=200'], createdAt: '2 days ago', helpful: 24, userAvatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&h=200&fit=crop&crop=face' },
+  { id: 'rev2', businessId: 'food-1', userId: 'u3', userName: 'Sarah M.', rating: 5, text: 'Best Ethiopian restaurant in Addis. The live music creates such a vibrant atmosphere.', createdAt: '1 week ago', helpful: 18, userAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop&crop=face' },
   { id: 'rev3', businessId: 'food-1', userId: 'u4', userName: 'Tewodros A.', rating: 4, text: 'Great food and service. Would recommend the platter for sharing.', createdAt: '2 weeks ago', helpful: 12 },
-  { id: 'rev4', businessId: 'cafe-1', userId: 'u3', userName: 'Sarah M.', rating: 5, text: 'Best coffee in Addis! The single-origin Yirgacheffe is outstanding.', createdAt: '3 days ago', helpful: 22 },
+  { id: 'rev4', businessId: 'cafe-1', userId: 'u3', userName: 'Sarah M.', rating: 5, text: 'Best coffee in Addis! The single-origin Yirgacheffe is outstanding.', createdAt: '3 days ago', helpful: 22, userAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop&crop=face' },
   { id: 'rev5', businessId: 'hotel-1', userId: 'u4', userName: 'Tewodros A.', rating: 5, text: 'World-class hotel with exceptional service. The gardens are stunning.', createdAt: '1 week ago', helpful: 28 },
 ];
 
